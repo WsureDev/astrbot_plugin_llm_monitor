@@ -6,6 +6,7 @@ import json
 import re
 import time
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,9 @@ from .store import EventStore
 PLUGIN_NAME = "astrbot_plugin_llm_monitor"
 TASK_EXTRA = f"{PLUGIN_NAME}.task_id"
 TASK_STATE_EXTRA = f"{PLUGIN_NAME}.task_state"
+RECONCILE_INTERVAL_SECONDS = 60
+RECONCILE_STARTUP_DELAY_SECONDS = 5
+RECONCILE_GRACE_SECONDS = 15
 
 
 def _now() -> float:
@@ -241,6 +245,7 @@ class LLMMonitorPlugin(Star):
         self._llm_sequences: dict[str, int] = {}
         self._llm_first_provider: dict[str, str] = {}
         self._tool_sequences: dict[str, int] = {}
+        self._reconcile_task: asyncio.Task | None = None
         self._started = False
 
         prefix = f"/{PLUGIN_NAME}"
@@ -264,11 +269,18 @@ class LLMMonitorPlugin(Star):
             self.probe.install()
         else:
             self.probe.status.update(enabled=False, reason="disabled by config")
+        if await self.store.list_running_tasks():
+            self._ensure_reconcile_task()
         self.self_check = self._build_self_check()
         logger.info("[%s] loaded; probe=%s data=%s", PLUGIN_NAME, self.probe.status, self.data_dir)
 
     async def terminate(self) -> None:
         self._started = False
+        if self._reconcile_task is not None:
+            self._reconcile_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._reconcile_task
+            self._reconcile_task = None
         self.probe.restore()
         await self.store.close()
 
@@ -277,6 +289,7 @@ class LLMMonitorPlugin(Star):
             "astrbot_version": {"ok": True, "value": __version__},
             "llm_probe": dict(self.probe.status),
             "tool_hooks": {"ok": True, "value": "registered by AstrBot event decorators"},
+            "running_recovery": self._registry_self_check(),
             "storage": {"ok": self.store.path.parent.exists(), "value": str(self.store.path)},
         }
         return {
@@ -295,6 +308,92 @@ class LLMMonitorPlugin(Star):
             self.store.enqueue(kind, payload)
         except Exception:
             logger.exception("[%s] monitor record enqueue failed", PLUGIN_NAME)
+
+    def _ensure_reconcile_task(self) -> None:
+        if not self._started:
+            return
+        if self._reconcile_task is None or self._reconcile_task.done():
+            self._reconcile_task = asyncio.create_task(self._reconcile_loop())
+
+    async def _reconcile_loop(self) -> None:
+        try:
+            await asyncio.sleep(RECONCILE_STARTUP_DELAY_SECONDS)
+            while True:
+                running_tasks = await self.store.list_running_tasks()
+                if not running_tasks:
+                    return
+                await self._reconcile_running_tasks(running_tasks)
+                await asyncio.sleep(RECONCILE_INTERVAL_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("[%s] running task reconciliation failed", PLUGIN_NAME)
+        finally:
+            if self._reconcile_task is asyncio.current_task():
+                self._reconcile_task = None
+
+    def _active_registry_snapshot(self) -> tuple[dict, dict] | None:
+        try:
+            from astrbot.core.utils.active_event_registry import active_event_registry
+
+            events = getattr(active_event_registry, "_events", None)
+            callbacks = getattr(active_event_registry, "_agent_stop_callbacks", None)
+            if not isinstance(events, dict) or not isinstance(callbacks, dict):
+                return None
+            return events, callbacks
+        except Exception:
+            logger.warning("[%s] active event registry is unavailable", PLUGIN_NAME)
+            return None
+
+    def _task_is_live(self, task: dict[str, Any], snapshot: tuple[dict, dict]) -> bool | None:
+        events_by_umo, callbacks = snapshot
+        umo = str(task.get("umo") or "")
+        task_id = str(task.get("task_id") or "")
+        events = events_by_umo.get(umo, set())
+        for event in events:
+            try:
+                if str(event.get_extra(TASK_EXTRA) or "") == task_id:
+                    return True
+            except Exception:
+                continue
+        for event in callbacks:
+            try:
+                if str(getattr(event, "unified_msg_origin", "")) == umo:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _reconcile_running_tasks(self, tasks: list[dict[str, Any]]) -> None:
+        snapshot = self._active_registry_snapshot()
+        if snapshot is None:
+            return
+        now = _now()
+        for task in tasks:
+            started_at = float(task.get("started_at") or task.get("created_at") or now)
+            if now - started_at < RECONCILE_GRACE_SECONDS:
+                continue
+            live = self._task_is_live(task, snapshot)
+            if live is False:
+                self.store.enqueue_recovered(
+                    str(task.get("task_id") or ""),
+                    "database task was running but no matching active AstrBot event or Agent runner was found",
+                )
+                logger.warning(
+                    "[%s] recovered orphaned running task task_id=%s umo=%s",
+                    PLUGIN_NAME,
+                    task.get("task_id"),
+                    task.get("umo"),
+                )
+
+    def _registry_self_check(self) -> dict[str, Any]:
+        snapshot = self._active_registry_snapshot()
+        return {
+            "ok": snapshot is not None,
+            "value": "active_event_registry introspection available"
+            if snapshot is not None
+            else "active_event_registry internals unavailable",
+        }
 
     def _end_task(self, event: AstrMessageEvent | None, status: str) -> None:
         try:
@@ -325,6 +424,7 @@ class LLMMonitorPlugin(Star):
         }
         event.set_extra(TASK_STATE_EXTRA, state)
         self._safe_enqueue("task_start", self._task_from_event(task_id, event, state))
+        self._ensure_reconcile_task()
         return task_id
 
     def _task_state(self, event: AstrMessageEvent | None) -> dict[str, Any]:

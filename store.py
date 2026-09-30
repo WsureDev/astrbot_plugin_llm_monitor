@@ -178,6 +178,18 @@ class EventStore:
                         payload.get("task_id"),
                     ),
                 )
+            elif kind == "task_recover":
+                db.execute(
+                    """UPDATE tasks SET finished_at = ?, status = 'recovered',
+                    duration = MAX(0, ? - COALESCE(started_at, created_at)), error = ?
+                    WHERE task_id = ? AND status = 'running'""",
+                    (
+                        payload.get("finished_at", time.time()),
+                        payload.get("finished_at", time.time()),
+                        payload.get("reason", "no matching active AstrBot task"),
+                        payload.get("task_id"),
+                    ),
+                )
             elif kind == "llm_start":
                 db.execute(
                     """INSERT OR REPLACE INTO llm_calls
@@ -288,6 +300,20 @@ class EventStore:
                 [*args, limit, offset],
             ).fetchall()
             return {"items": [dict(row) for row in rows], "limit": limit, "offset": offset}
+
+    async def list_running_tasks(self) -> list[dict[str, Any]]:
+        with sqlite3.connect(self.path) as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute(
+                "SELECT * FROM tasks WHERE status = 'running' ORDER BY created_at ASC"
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def enqueue_recovered(self, task_id: str, reason: str) -> None:
+        self.enqueue(
+            "task_recover",
+            {"task_id": task_id, "finished_at": time.time(), "reason": reason},
+        )
 
     async def summary(self, hours: int) -> dict[str, Any]:
         cutoff = time.time() - hours * 3600
