@@ -223,6 +223,9 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
         filtered = await self.store.list_tasks(model="resolved-model", platform="channel")
         summary = await self.store.summary(model="resolved-model", platform="channel")
         self.assertEqual((filtered["total"], summary["tasks"], summary["total_tokens"]), (1, 1, 11))
+        options = await self.store.filter_options()
+        self.assertIn("channel", options["platforms"])
+        self.assertIn("model-a", options["models"])
         self.assertEqual(summary["models"][0]["p95"], 3)
         self.assertEqual(summary["models"][0]["avg_ttft"], 0.2)
         self.assertEqual((await self.store.list_tasks(model="%"))["total"], 0)
@@ -282,7 +285,7 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(record["llm_calls"][0]["round_id"])
         self.assertEqual(record["retry_attempts"], [])
         with sqlite3.connect(self.store.path) as db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 4)
 
     async def test_upgrade_existing_schema_keeps_data(self):
         self.task("existing")
@@ -412,6 +415,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_fallback_model_usage_and_nonstream_ttft(self):
+        self.runner.run_context.messages = [{"role": "user", "content": "draw a cat"}]
         self.outputs[0].usage = NS(input_other=5, input_cached=2, output=7)
         self.outputs[0].raw_completion = {"model": "resolved"}
         result = [item async for item in self.runner._iter_llm_responses(include_model=False)]
@@ -423,6 +427,43 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(call["ttft"])
         self.assertEqual(call["output"], 7)
+        self.assertIn("draw a cat", call["input_text"])
+        self.assertIn("ok", call["output_text"] if call["output_text"] else "")
+
+    async def test_cron_continuation_reuses_original_caller_identity(self):
+        await self.plugin.on_llm_request(self.event, self.runner.req)
+        await self.plugin.on_agent_done(self.event, None, self.outputs[0])
+        cron = Event()
+        cron.unified_msg_origin = self.event.unified_msg_origin
+        cron.get_platform_name = lambda: "cron"
+        cron.get_platform_id = lambda: "platform-cron"
+        cron.get_message_type = lambda: "FriendMessage"
+        cron.get_sender_id = lambda: "astrbot"
+        cron.get_sender_name = lambda: "ImageGeneration"
+        cron.get_group_id = lambda: ""
+        cron.set_extra(
+            main.CALLER_EXTRA,
+            {
+                "platform_name": "test",
+                "platform_id": "platform-1",
+                "message_type": "GroupMessage",
+                "sender_id": "user-1",
+                "sender_name": "User",
+                "group_id": "group-1",
+            },
+        )
+        await self.plugin.on_agent_begin(cron, None)
+        await self.plugin.store.flush()
+        task_id = cron.get_extra(main.TASK_EXTRA)
+        record = await self.plugin.store.get_task(task_id)
+        self.assertEqual(
+            (
+                record["task"]["sender_id"],
+                record["task"]["sender_name"],
+                record["task"]["platform_name"],
+            ),
+            ("user-1", "User", "test"),
+        )
 
     async def test_stream_error_and_first_content_chunk(self):
         self.outputs = [

@@ -12,6 +12,7 @@ const state = {
   timer: null,
   lastSuccess: null,
   total: 0,
+  options: { models: [], platforms: [] },
 };
 const labels = {
   running: "运行中",
@@ -60,12 +61,65 @@ const clock = (item) =>
   "</span>";
 
 function filters() {
+  const checked = (id) =>
+    [...byId(id).querySelectorAll('input[type="checkbox"]:checked')].map(
+      (node) => node.value,
+    );
   return {
     hours: Number(byId("hours").value),
     status: byId("status").value,
-    model: byId("model").value.trim(),
-    platform: byId("platform").value.trim(),
+    model: JSON.stringify(checked("model-options")),
+    platform: JSON.stringify(checked("platform-options")),
   };
+}
+
+function renderFilterOptions(kind, values) {
+  const menu = byId(kind + "-options");
+  const label = byId(kind + "-label");
+  const previous = new Set(
+    [...menu.querySelectorAll('input[type="checkbox"]:checked')].map(
+      (node) => node.value,
+    ),
+  );
+  for (const value of [...previous])
+    if (!values.includes(value)) previous.delete(value);
+  menu.innerHTML = values.length
+    ? values
+        .map(
+          (value) =>
+            '<label class="check-option"><input type="checkbox" value="' +
+            esc(value) +
+            '"' +
+            (previous.has(value) ? " checked" : "") +
+            " /> <span>" +
+            esc(value) +
+            "</span></label>",
+        )
+        .join("")
+    : '<span class="empty-option">当前范围暂无选项</span>';
+  label.textContent =
+    (kind === "model" ? "模型" : "渠道") +
+    "：" +
+    (previous.size ? "已选 " + previous.size : "全部");
+  for (const checkbox of menu.querySelectorAll('input[type="checkbox"]')) {
+    checkbox.addEventListener("change", () => {
+      byId(kind + "-label").textContent =
+        (kind === "model" ? "模型" : "渠道") +
+        "：" +
+        (menu.querySelectorAll('input[type="checkbox"]:checked').length
+          ? "已选 " +
+            menu.querySelectorAll('input[type="checkbox"]:checked').length
+          : "全部");
+      state.offset = 0;
+      refresh();
+    });
+  }
+}
+
+function renderFilterMenus(options) {
+  state.options = options || { models: [], platforms: [] };
+  renderFilterOptions("model", state.options.models || []);
+  renderFilterOptions("platform", state.options.platforms || []);
 }
 
 function message(id, text) {
@@ -155,7 +209,11 @@ function renderTasks(result) {
     result.items
       .map(
         (item) =>
-          '<tr aria-selected="' +
+          '<tr data-task-id="' +
+          esc(item.task_id) +
+          '" tabindex="0" role="button" aria-label="查看任务 ' +
+          esc(item.task_id) +
+          '" aria-selected="' +
           (state.selected === item.task_id) +
           '"><td>' +
           '<button class="link-button" data-task-id="' +
@@ -190,6 +248,17 @@ function renderTasks(result) {
     button.addEventListener("click", () => selectTask(button.dataset.taskId));
     if (focusedId === button.dataset.taskId)
       button.focus({ preventScroll: true });
+  }
+  for (const row of byId("rows").querySelectorAll("tr[data-task-id]")) {
+    row.addEventListener("click", (event) => {
+      if (!event.target.closest("button")) selectTask(row.dataset.taskId);
+    });
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectTask(row.dataset.taskId);
+      }
+    });
   }
   byId("prev").disabled = state.offset === 0;
   byId("next").disabled = !result.has_more;
@@ -243,64 +312,46 @@ function retryDetails(item) {
 }
 
 function renderAttempts(attempts, callId) {
-  if (!attempts.length)
-    return '<p class="muted">没有分层记录（可能是历史数据或未覆盖的 Provider）。</p>';
-  const ids = new Set(attempts.map((a) => a.id));
-  const children = new Map();
-  for (const attempt of attempts) {
-    const parent = ids.has(attempt.parent_id) ? attempt.parent_id : callId;
-    if (!children.has(parent)) children.set(parent, []);
-    children.get(parent).push(attempt);
-  }
-  const seen = new Set();
-  function render(parent, depth) {
-    return (children.get(parent) || [])
-      .map((attempt) => {
-        if (seen.has(attempt.id) || depth > 3) return "";
-        seen.add(attempt.id);
-        const layer =
-          {
-            provider: "Provider 适配器",
-            request: "请求重试器",
-            http: "SDK/HTTP",
-          }[attempt.layer] || attempt.layer;
-        return (
-          '<details data-key="attempt-' +
-          esc(attempt.id) +
-          '"><summary>' +
-          badge(attempt.status) +
-          " " +
-          esc(layer) +
-          " · 尝试 #" +
-          num(attempt.attempt_number) +
-          (attempt.is_retry ? " " + badge("retry", "Retry") : "") +
-          (attempt.http_status ? " · HTTP " + num(attempt.http_status) : "") +
-          " · " +
-          clock(attempt) +
-          '</summary><div class="payload">' +
-          '<div class="secondary">' +
-          esc(attempt.operation) +
-          " · " +
-          esc(when(attempt.started_at)) +
-          "</div>" +
-          retryDetails(attempt) +
-          (attempt.error
-            ? "<label>本次错误</label><pre>" + esc(attempt.error) + "</pre>"
-            : "") +
-          (attempt.end_inferred
-            ? '<p class="muted">结束状态由父任务推断。</p>'
-            : "") +
-          '<div class="attempt-tree">' +
-          render(attempt.id, depth + 1) +
-          "</div></div></details>"
-        );
-      })
-      .join("");
-  }
-  return render(callId, 0);
+  return attempts
+    .map((attempt) => {
+      const layer =
+        {
+          provider: "Provider 适配器",
+          request: "请求重试器",
+          http: "SDK/HTTP",
+        }[attempt.layer] || attempt.layer;
+      return (
+        '<details data-key="attempt-' +
+        esc(attempt.id) +
+        '"><summary>' +
+        badge(attempt.status) +
+        " " +
+        esc(layer) +
+        " · 尝试 #" +
+        num(attempt.attempt_number) +
+        (attempt.is_retry ? " " + badge("retry", "Retry") : "") +
+        (attempt.http_status ? " · HTTP " + num(attempt.http_status) : "") +
+        " · " +
+        clock(attempt) +
+        '</summary><div class="payload"><div class="secondary">' +
+        esc(attempt.operation || "") +
+        " · " +
+        esc(when(attempt.started_at)) +
+        "</div>" +
+        retryDetails(attempt) +
+        (attempt.error
+          ? "<label>错误</label><pre>" + esc(attempt.error) + "</pre>"
+          : "") +
+        (attempt.end_inferred
+          ? '<p class="muted">结束状态由父任务推断。</p>'
+          : "") +
+        "</div></details>"
+      );
+    })
+    .join("");
 }
 
-function renderCall(call, attempts) {
+function renderCall(call) {
   return (
     '<details data-key="llm-' +
     esc(call.id) +
@@ -339,14 +390,17 @@ function renderCall(call, attempts) {
     num(call.attempt_number || 1) +
     "</div>" +
     retryDetails(call) +
+    "<label>输入（来自 AstrBot 上下文）</label><pre>" +
+    esc(call.input_text || "未采集") +
+    "</pre><label>输出</label><pre>" +
+    esc(call.output_text || "未采集") +
+    "</pre>" +
     (call.end_inferred
       ? '<p class="muted">结束状态由父任务推断，不计入耗时分位数。</p>'
       : "") +
     (call.error
       ? "<label>错误</label><pre>" + esc(call.error) + "</pre>"
       : "") +
-    '<h4 class="section-title">分层尝试</h4>' +
-    renderAttempts(attempts, call.id) +
     "</div></details>"
   );
 }
@@ -398,15 +452,15 @@ function renderDetail(result) {
     0,
   );
   const timeline = calls
-    .map((call) => ({
-      at: call.started_at,
-      html: renderCall(
-        call,
-        attempts.filter((a) => a.llm_call_id === call.id),
-      ),
-    }))
+    .map((call) => ({ at: call.started_at, html: renderCall(call) }))
     .concat(
       tools.map((tool) => ({ at: tool.started_at, html: renderTool(tool) })),
+    )
+    .concat(
+      attempts.map((attempt) => ({
+        at: attempt.started_at,
+        html: renderAttempts([attempt], attempt.llm_call_id),
+      })),
     )
     .sort((a, b) => a.at - b.at);
   byId("detail").innerHTML =
@@ -482,7 +536,7 @@ async function refresh() {
   const query = filters();
   byId("updated").textContent = "正在更新…";
   try {
-    const [tasks, summary, health] = await Promise.all([
+    const [tasks, summary, health, options] = await Promise.all([
       bridge.apiGet("tasks", {
         ...query,
         limit: state.limit,
@@ -490,6 +544,7 @@ async function refresh() {
       }),
       bridge.apiGet("summary", query),
       bridge.apiGet("health"),
+      bridge.apiGet("filters", { hours: query.hours }),
     ]);
     if (generation !== state.generation) return;
     if (tasks.total > 0 && !tasks.items.length && state.offset >= tasks.total) {
@@ -498,6 +553,7 @@ async function refresh() {
     }
     renderTasks(tasks);
     renderSummary(summary);
+    renderFilterMenus(options);
     setHealth(health);
     state.lastSuccess = new Date().toLocaleTimeString();
     byId("updated").textContent = "更新于 " + state.lastSuccess;
@@ -552,6 +608,8 @@ async function selfCheck() {
       (result.reply_filter ? "开启" : "关闭") +
       "</span><span>重试探针：" +
       (result.retry_coverage?.ok ? "已安装" : "未完整覆盖") +
+      "</span><span>生图续接：" +
+      (result.continuation_coverage?.installed ? "已安装" : "待生图插件加载") +
       "</span></div>" +
       '<p class="muted">框架 / 请求 / HTTP：' +
       ["framework", "request", "http"]
@@ -580,7 +638,7 @@ byId("filters").addEventListener("submit", (event) => {
   state.offset = 0;
   refresh();
 });
-for (const id of ["hours", "status", "model", "platform"]) {
+for (const id of ["hours", "status"]) {
   byId(id).addEventListener("change", () => {
     state.offset = 0;
     refresh();

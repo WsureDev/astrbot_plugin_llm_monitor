@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from contextlib import suppress
@@ -15,16 +16,18 @@ from astrbot.api.message_components import Plain
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.api.web import json_response, request
 
+from .continuation import CONTINUATION_EXTRA, IDENTITY_EXTRA, ContinuationProbe
 from .probe import RunnerProbe, event_from, field
 from .reply_filter import strip_thinking
 from .serialization import redact_text
 from .store import EventStore
 
 PLUGIN_NAME = "astrbot_plugin_llm_monitor"
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 TASK_EXTRA = f"{PLUGIN_NAME}.task_id"
 TASK_STATE_EXTRA = f"{PLUGIN_NAME}.task_state"
 QUEUED_EXTRA = f"{PLUGIN_NAME}.queued_at"
+CALLER_EXTRA = IDENTITY_EXTRA
 RECONCILE_INTERVAL_SECONDS = 60
 RECONCILE_STARTUP_DELAY_SECONDS = 5
 RECONCILE_GRACE_SECONDS = 15
@@ -57,10 +60,12 @@ class LLMMonitorPlugin(Star):
         self._last_record_error = ""
         self._last_warning = 0.0
         self._recovery_error = ""
+        self.continuations = ContinuationProbe(self)
         for route, handler in (
             ("health", self.health),
             ("self-check", self.self_check_api),
             ("summary", self.summary_api),
+            ("filters", self.filters_api),
             ("tasks", self.tasks_api),
             ("tasks/<task_id>", self.task_api),
         ):
@@ -93,6 +98,7 @@ class LLMMonitorPlugin(Star):
             logger.warning(
                 "[%s] retry coverage incomplete: %s", PLUGIN_NAME, self.probe.retry.status["reason"]
             )
+        self.continuations.guard(self.continuations.discover)
         if self.store.accepting:
             self._ensure_reconcile_task()
 
@@ -103,6 +109,7 @@ class LLMMonitorPlugin(Star):
             with suppress(asyncio.CancelledError):
                 await self._reconcile_task
             self._reconcile_task = None
+        self.continuations.restore()
         self.probe.restore()
         # AstrBot 4.28 keeps registered handlers in a shared list; remove only ours.
         routes = getattr(self.context, "registered_web_apis", None)
@@ -132,17 +139,21 @@ class LLMMonitorPlugin(Star):
         state = event.get_extra(TASK_STATE_EXTRA)
         if isinstance(state, dict) and not (new_cycle and state.get("ended")):
             return None if state.get("ended") else state
+        identity = event.get_extra(CALLER_EXTRA)
+        if not isinstance(identity, dict):
+            identity = {}
         state = dict(task_id=uuid.uuid4().hex, created_at=time.time(), llm_seq=0, tool_seq=0)
         record = dict(
             task_id=state["task_id"],
             created_at=state["created_at"],
             umo=event.unified_msg_origin,
-            platform_name=event.get_platform_name(),
-            platform_id=event.get_platform_id(),
-            message_type=str(event.get_message_type()),
-            sender_id=event.get_sender_id(),
-            sender_name=event.get_sender_name(),
-            group_id=event.get_group_id(),
+            platform_name=identity.get("platform_name") or event.get_platform_name(),
+            platform_id=identity.get("platform_id") or event.get_platform_id(),
+            message_type=identity.get("message_type") or str(event.get_message_type()),
+            sender_id=identity.get("sender_id") or event.get_sender_id(),
+            sender_name=identity.get("sender_name") or event.get_sender_name(),
+            group_id=identity.get("group_id") or event.get_group_id(),
+            **self._continuation_metadata(event),
         )
         if not self._enqueue("task_start", record):
             return None
@@ -150,6 +161,39 @@ class LLMMonitorPlugin(Star):
         event.set_extra(TASK_STATE_EXTRA, state)
         self._ensure_reconcile_task()
         return state
+
+    def _continuation_metadata(self, event):
+        scope = event.get_extra(CONTINUATION_EXTRA)
+        if not scope:
+            return {}
+        return dict(
+            parent_task_id=scope["source"].get_extra(TASK_EXTRA),
+            trigger="image_result",
+            external_task_id=scope["task_id"],
+        )
+
+    @filter.on_plugin_loaded()
+    async def on_plugin_loaded(self, metadata):
+        self.continuations.guard(self.continuations.discover)
+
+    def finish_continuation(self, scope, status):
+        if status == "completed":
+            status = "completed" if scope["sent"] and not scope["failed"] else "error"
+        reason = scope["error"] or (
+            "No successful result delivery observed" if status == "error" else ""
+        )
+        for event in scope["events"]:
+            state = event.get_extra(TASK_STATE_EXTRA)
+            if not isinstance(state, dict):
+                continue
+            # Override an early Agent end with the delivery owner's real result.
+            if self._enqueue(
+                "task_end",
+                dict(
+                    task_id=state["task_id"], finished_at=time.time(), status=status, error=reason
+                ),
+            ):
+                state["ended"] = True
 
     def _start_span(self, kind, event, **fields):
         state = self._ensure_task(event)
@@ -178,6 +222,7 @@ class LLMMonitorPlugin(Star):
         # AstrBot explicitly sets include_model=False for fallback provider attempts.
         fallback = not include_model
         retry = self.probe.retry.llm_metadata(runner)
+        messages = field(field(runner, "run_context"), "messages", [])
         return self._start_span(
             "llm",
             event,
@@ -185,6 +230,7 @@ class LLMMonitorPlugin(Star):
             provider_model=model,
             attempt_kind="retry" if retry.get("is_retry") else "fallback" if fallback else "round",
             is_fallback=fallback,
+            input_text=dict(model=model, messages=list(messages or [])),
             **retry,
         )
 
@@ -244,6 +290,9 @@ class LLMMonitorPlugin(Star):
     def end_task(self, event, status, error=""):
         if event is None:
             return
+        continuation = event.get_extra(CONTINUATION_EXTRA)
+        if continuation and status == "interrupted":
+            return  # The delivery owner, not a deliberately closed runner, ends this task.
         state = event.get_extra(TASK_STATE_EXTRA)
         if not isinstance(state, dict) or state.get("ended"):
             return
@@ -328,6 +377,12 @@ class LLMMonitorPlugin(Star):
         return None
 
     def _task_is_live(self, task, snapshot):
+        if any(
+            scope["active"]
+            and any(event.get_extra(TASK_EXTRA) == task["task_id"] for event in scope["events"])
+            for scope in self.continuations.active
+        ):
+            return True
         events, callbacks = snapshot
         candidates = list(events.get(task.get("umo") or "", ())) + list(callbacks)
         for event in candidates:
@@ -403,6 +458,7 @@ class LLMMonitorPlugin(Star):
             storage=storage,
             probe=probe,
             retry_coverage=retry,
+            continuation_coverage=self.continuations.snapshot(),
             recovery=dict(ok=registry and not self._recovery_error, error=self._recovery_error),
             record_errors=self._record_errors,
             last_record_error=self._last_record_error,
@@ -425,11 +481,22 @@ class LLMMonitorPlugin(Star):
 
     def _query(self):
         status = request.query.get("status", "")
+
+        def multi(name, limit):
+            raw = request.query.get(name, "")
+            try:
+                value = json.loads(raw) if raw.startswith("[") else raw
+            except (TypeError, ValueError):
+                value = raw
+            if isinstance(value, list):
+                return [str(item)[:limit] for item in value if str(item).strip()][:20]
+            return str(value)[:limit] if value else ""
+
         return dict(
             hours=self._number("hours", 24, 0, 8760),
             status=status if status in VALID_STATUSES else "",
-            model=str(request.query.get("model", ""))[:200],
-            platform=str(request.query.get("platform", ""))[:100],
+            model=multi("model", 200),
+            platform=multi("platform", 100),
         )
 
     async def _respond(self, operation):
@@ -457,6 +524,11 @@ class LLMMonitorPlugin(Star):
 
     async def summary_api(self):
         return await self._respond(self.store.summary(**self._query()))
+
+    async def filters_api(self):
+        return await self._respond(
+            self.store.filter_options(hours=self._number("hours", 24, 0, 8760))
+        )
 
     async def task_api(self, task_id: str):
         return await self._respond(self.store.get_task(task_id))

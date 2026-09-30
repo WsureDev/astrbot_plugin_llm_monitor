@@ -73,6 +73,7 @@ const pageRoot = path.resolve(__dirname, "../pages/monitor");
           http: true,
           provider_classes: ["ProviderOpenAIOfficial"],
         },
+        continuation_coverage: { installed: true, reason: "test" },
         storage: { ok: !fixture.unhealthy, failed: fixture.unhealthy ? 3 : 0 },
       });
       window.AstrBotPluginPage = {
@@ -116,12 +117,24 @@ const pageRoot = path.resolve(__dirname, "../pages/monitor");
                 },
               ],
             };
+          if (endpoint === "filters")
+            return {
+              models: ["old", "new", "test-model"],
+              platforms: ["test"],
+            };
           if (endpoint === "tasks") {
             if (fixture.failure) throw Error("backend unavailable");
-            if (fixture.race) await pause(query.model === "old" ? 120 : 10);
+            if (fixture.race)
+              await pause(String(query.model || "").includes("old") ? 120 : 10);
+            let selectedModel = "";
+            try {
+              selectedModel = JSON.parse(query.model || "[]")[0] || "";
+            } catch (_) {
+              selectedModel = query.model || "";
+            }
             const items = Array.from(
               { length: query.offset ? 5 : 50 },
-              (_, i) => task(query.model || "task-" + (query.offset + i)),
+              (_, i) => task(selectedModel || "task-" + (query.offset + i)),
             );
             return {
               items,
@@ -287,13 +300,14 @@ const pageRoot = path.resolve(__dirname, "../pages/monitor");
       1,
     );
     assert.equal(
-      await page
-        .locator(
-          '[data-key="attempt-adapter-1"] [data-key="attempt-request-1"] [data-key="attempt-http-1"]',
-        )
-        .count(),
+      await page.locator('[data-key="attempt-adapter-1"]').count(),
       1,
     );
+    assert.equal(
+      await page.locator('[data-key="attempt-request-1"]').count(),
+      1,
+    );
+    assert.equal(await page.locator('[data-key="attempt-http-1"]').count(), 1);
     assert.equal(
       await page.locator('[data-key="attempt-http-1"]').getAttribute("open"),
       "",
@@ -307,7 +321,7 @@ const pageRoot = path.resolve(__dirname, "../pages/monitor");
       /HTTP 200/,
     );
     checks.push(
-      "four retry counters, simultaneous fallback and retry, nested attempts, cancelled waits and expansion persist",
+      "four retry counters, simultaneous fallback and retry, flat timeline, cancelled waits and expansion persist",
     );
 
     await page.evaluate(async () => {
@@ -335,9 +349,13 @@ const pageRoot = path.resolve(__dirname, "../pages/monitor");
 
     await page.evaluate(async () => {
       fixture.race = true;
-      document.getElementById("model").value = "old";
+      document.querySelector('#model-options input[value="old"]').checked =
+        true;
       const old = refresh();
-      document.getElementById("model").value = "new";
+      document.querySelector('#model-options input[value="old"]').checked =
+        false;
+      document.querySelector('#model-options input[value="new"]').checked =
+        true;
       await Promise.all([old, refresh()]);
     });
     assert.equal(
@@ -350,7 +368,7 @@ const pageRoot = path.resolve(__dirname, "../pages/monitor");
           fixture.requests.filter((r) => r.endpoint === "summary").at(-1).query
             .model,
       ),
-      "new",
+      '["new"]',
     );
     checks.push(
       "stale list response discarded; list and summary share filters",
@@ -392,7 +410,10 @@ const pageRoot = path.resolve(__dirname, "../pages/monitor");
       fixture.race = false;
       fixture.detailFailure = false;
       fixture.checkFailure = false;
-      document.getElementById("model").value = "";
+      for (const input of document.querySelectorAll(
+        '#model-options input[type="checkbox"]',
+      ))
+        input.checked = false;
       await refresh();
     });
     await page.setViewportSize({ width: 390, height: 844 });
@@ -407,7 +428,10 @@ const pageRoot = path.resolve(__dirname, "../pages/monitor");
     );
     assert.ok(await page.locator("#close-detail").isVisible());
     assert.ok(
-      await page.locator("#model").evaluate((node) => node.labels.length > 0),
+      await page
+        .locator("#model-options .check-option")
+        .first()
+        .evaluate((node) => node.querySelector("input").labels.length > 0),
     );
     checks.push(
       "390px mobile layout has no page overflow and opens full-screen details",

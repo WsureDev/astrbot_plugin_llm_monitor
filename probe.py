@@ -11,6 +11,7 @@ import functools
 import inspect
 import time
 
+from .payloads import ResponseCapture
 from .retry_probe import CALL, RetryProbe, scoped_iterator
 
 
@@ -75,11 +76,15 @@ class RunnerProbe:
                 call = self.retry.guard(lambda: self.retry.begin_call(runner, span))
                 iterator = scoped_iterator(llm(runner, include_model=include_model), CALL, call)
                 status, error, ttft, usage, response_model = "interrupted", "", None, {}, ""
+                capture = ResponseCapture(
+                    getattr(getattr(self.plugin, "store", None), "max_text_chars", 20000)
+                )
                 try:
                     async for response in iterator:
                         if span:
                             try:
                                 chunk = field(response, "is_chunk", False)
+                                capture.feed(response)
                                 content = (
                                     field(response, "completion_text")
                                     or field(response, "reasoning_content")
@@ -138,6 +143,7 @@ class RunnerProbe:
                             ttft=ttft,
                             usage=usage,
                             response_model=response_model,
+                            output_text=capture.result(),
                         )
 
             @functools.wraps(execute)
@@ -198,7 +204,15 @@ class RunnerProbe:
                         await iterator.aclose()
                     finally:
                         if not exhausted:
-                            self._record("end_task", event, "interrupted")
+                            done = bool(getattr(runner, "done", lambda: False)())
+                            if done:
+                                final = getattr(runner, "get_final_llm_resp", lambda: None)()
+                                final_status = (
+                                    "error" if field(final, "role") == "err" else "completed"
+                                )
+                                self._record("end_task", event, final_status)
+                            else:
+                                self._record("end_task", event, "interrupted")
 
             for wrapper in (wrapped_llm, wrapped_step, wrapped_execute):
                 wrapper._astrbot_llm_monitor_wrapper = True

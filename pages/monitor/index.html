@@ -43,15 +43,24 @@
             <option value="recovered">异常恢复</option>
           </select></label
         >
-        <label
-          >模型<input id="model" placeholder="模型名称包含" maxlength="200"
-        /></label>
-        <label
-          >渠道<input
-            id="platform"
-            placeholder="渠道名称（精确匹配）"
-            maxlength="100"
-        /></label>
+        <details class="multi-filter" id="model-filter">
+          <summary id="model-label">模型：全部</summary>
+          <div
+            class="multi-menu"
+            id="model-options"
+            role="group"
+            aria-label="模型筛选"
+          ></div>
+        </details>
+        <details class="multi-filter" id="platform-filter">
+          <summary id="platform-label">渠道：全部</summary>
+          <div
+            class="multi-menu"
+            id="platform-options"
+            role="group"
+            aria-label="渠道筛选"
+          ></div>
+        </details>
         <button class="btn" type="submit" id="refresh">刷新</button>
         <button class="btn ghost" type="button" id="pause" aria-pressed="false">
           暂停自动刷新

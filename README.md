@@ -2,7 +2,7 @@
 
 记录 Agent 任务、每次逻辑 LLM 请求、模型、耗时、Token 用量和工具执行，并在插件的 monitor 页面查看。
 
-v0.3.0 的实现与测试以 **AstrBot v4.28.0 源码**为依据。运行时探针检查目标方法的签名及 async generator / classmethod 形态；不兼容时停止安装对应探针，在页面自检中显示原因。其他 AstrBot 版本仍需验证。
+v0.4.0 的实现与测试以 **AstrBot v4.28.0 源码**为依据。运行时探针检查目标方法的签名及 async generator / classmethod 形态；不兼容时停止安装对应探针，在页面自检中显示原因。其他 AstrBot 版本仍需验证。
 
 ## 使用与升级
 
@@ -10,7 +10,7 @@ v0.3.0 的实现与测试以 **AstrBot v4.28.0 源码**为依据。运行时探�
 2. 在插件详情页打开 monitor 页面。页面 API 复用 AstrBot 的登录鉴权和 Plugin Page Bridge；资源由宿主处理认证参数和主题。
 3. 点击「运行自检」检查采集、探针、存储、运行状态恢复及回复过滤。
 
-数据库仍位于 StarTools.get_data_dir("astrbot_plugin_llm_monitor") 下的 events.sqlite3。升级在原有表上增加字段和索引，保留历史记录。更新前可按日常运维流程备份该文件。当前数据库 schema 为 3，拒绝打开更高版本的 schema。
+数据库仍位于 StarTools.get_data_dir("astrbot_plugin_llm_monitor") 下的 events.sqlite3。升级在原有表上增加字段和索引，保留历史记录。更新前可按日常运维流程备份该文件。当前数据库 schema 为 4，拒绝打开更高版本的 schema。
 
 插件没有新增运行时第三方依赖；Node、Playwright、Prettier、Ruff 仅用于开发与测试。
 
@@ -60,13 +60,21 @@ on_decorating_result 在 AstrBot 的非流式分段回复之前，删除同一�
 | 请求 | AstrBot request_retry._build_retrying 创建的重试器 | 请求层重试：同组第 2 次及之后执行的 request_factory |
 | SDK/HTTP | 上述 request_factory 内的 httpx.AsyncClient.send | SDK/HTTP 重试：SDK 重试头标识的后续发送；无该头时，识别同一 SDK 调用内同端点失败后的再次发送 |
 
-四层可能嵌套，**不能相加作为独立请求总数**。Token 仅取外层 LLM 返回用量，内层尝试不重复累计；失败调用未返回的用量无法还原。汇总和模型行分别展示四层计数，任务详情按「LLM → 适配器 → 请求 → HTTP」展开。
+四层可能嵌套，**不能相加作为独立请求总数**。Token 仅取外层 LLM 返回用量，内层尝试不重复累计；失败调用未返回的用量无法还原。汇总和模型行分别展示四层计数，任务详情按开始时间平铺显示。
 
 仅在下一次尝试实际开始时增加重试数。在退避等待期间取消，只标记「等待已取消」，不计入尚未开始的重试。框架/请求层同时保存计划退避、实测等待和等待状态；适配器恢复间隔、SDK/HTTP 间隔包含本地处理时间，不冒充精确 sleep 时间。HTTP 耗时为 HTTPX send 的耗时：流式请求到响应头返回，非流式包含响应体读取；流式正文后续失败由外层记录。
 
 适配器边界覆盖 AstrBot 4.28 的 OpenAI、OpenAI Responses、Anthropic、Gemini、SSYCloud 实现，按实际使用延迟挂载。请求层也覆盖流式上下文管理器的进入重试；成功进入后读取流的过程不是该层的重试范围。OpenAI SDK 的自动 HTTP 重试通过真实 SDK + MockTransport 验证。
 
 自定义 Provider、绕过公共 request_retry 的 SDK、自定义非 HTTPX 传输、HTTPX 传输内部的连接重试不保证覆盖。自检展示框架/请求/HTTP 探针状态和已挂载适配器；「已安装」表示观测点有效，不表示任意第三方 Provider 都已被覆盖。插件不采集请求体、请求头或 URL 字段；错误文本仍可能含 SDK 提供的信息，会遵循配置执行限长和脱敏。
+
+## 生图续接与详情
+
+AstrBot 生图插件会先提交后台任务，再用新的 CronMessageEvent 唤醒 Agent 发送结果。插件通过生图插件的 `wake_ai_for_generation_task_result(source_event, task_id)` 绑定原始事件和精确的统一消息来源，复用原始平台、用户和群组；不会用同一会话里最近一条消息猜测调用者。对成功发送的图片，任务显示已完成；Agent 为了停止继续生成而提前关闭 step 生成器不会再覆盖为中断。自检中的「生图续接」显示该观测点是否已安装；未安装生图插件时不影响普通监控。
+
+详情按开始时间平铺展示 LLM 调用、各层 Retry 和工具调用，不再把三层重试嵌套在 LLM 下。LLM 展开显示来自 AstrBot runner 的上下文输入和最终响应；工具展开显示执行器输入和最后输出；Retry 展示层级、序号、原因、状态和等待时间。输入输出遵循 max_text_chars 和脱敏配置，无法由 AstrBot 对象提供的字段显示为「未采集」，避免伪造内容。
+
+列表整行可点击或用键盘 Enter/Space 打开详情，按钮有 hover/active/focus 反馈。模型和渠道筛选从保留数据动态生成，可多选；选项请求独立于任务列表，切换时间范围后自动刷新。
 
 ## 可靠性与健康状态
 
@@ -106,6 +114,6 @@ npm run format:check
 npm run test:ui
 ~~~
 
-浏览器测试使用拦截的模拟 API，不访问生产 AstrBot。覆盖分页、筛选竞态、详情刷新与竞态、错误提示、键盘操作、手机布局和内容转义，以及分层计数、重试树、等待取消与 Retry/Fallback 同时显示。可设 MONITOR_SCREENSHOT_DIR 保存截图，或用 PLAYWRIGHT_MODULE_PATH 指定现有 Playwright。
+浏览器测试使用拦截的模拟 API，不访问生产 AstrBot。覆盖分页、筛选竞态、详情刷新与竞态、错误提示、键盘操作、手机布局和内容转义，以及分层计数、扁平重试时间线、等待取消与 Retry/Fallback 同时显示。可设 MONITOR_SCREENSHOT_DIR 保存截图，或用 PLAYWRIGHT_MODULE_PATH 指定现有 Playwright。
 
 GitHub Actions 在 Python 3.12/3.13 下运行后端及 v4.28.0 源码测试，并运行 Chromium 交互测试和格式检查。

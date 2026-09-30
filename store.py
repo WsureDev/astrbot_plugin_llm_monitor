@@ -168,7 +168,7 @@ class EventStore:
         db = self._db
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA busy_timeout=500")
-        if db.execute("PRAGMA user_version").fetchone()[0] > 3:
+        if db.execute("PRAGMA user_version").fetchone()[0] > 4:
             raise RuntimeError("Database schema is newer than this plugin")
         db.executescript("""
             CREATE TABLE IF NOT EXISTS tasks (
@@ -176,7 +176,8 @@ class EventStore:
                 finished_at REAL, status TEXT NOT NULL, umo TEXT, platform_name TEXT,
                 platform_id TEXT, message_type TEXT, sender_id TEXT, sender_name TEXT,
                 group_id TEXT, conversation_id TEXT, provider_id TEXT, provider_model TEXT,
-                queued_at REAL, duration REAL, error TEXT, end_inferred INTEGER DEFAULT 0);
+                queued_at REAL, duration REAL, error TEXT, parent_task_id TEXT,
+                trigger TEXT, external_task_id TEXT, end_inferred INTEGER DEFAULT 0);
             CREATE TABLE IF NOT EXISTS llm_calls (
                 id TEXT PRIMARY KEY, task_id TEXT NOT NULL, sequence INTEGER NOT NULL,
                 started_at REAL NOT NULL, finished_at REAL, status TEXT NOT NULL,
@@ -184,6 +185,7 @@ class EventStore:
                 input_other INTEGER DEFAULT 0, input_cached INTEGER DEFAULT 0,
                 output INTEGER DEFAULT 0, attempt_kind TEXT DEFAULT 'round',
                 is_fallback INTEGER DEFAULT 0, error TEXT, response_model TEXT,
+                input_text TEXT, output_text TEXT,
                 end_inferred INTEGER DEFAULT 0);
             CREATE TABLE IF NOT EXISTS tool_calls (
                 id TEXT PRIMARY KEY, task_id TEXT NOT NULL, sequence INTEGER NOT NULL,
@@ -197,13 +199,21 @@ class EventStore:
                 duration REAL, error TEXT, http_status INTEGER, end_inferred INTEGER DEFAULT 0);
         """)
         migrations = {
-            "tasks": {"duration": "REAL", "end_inferred": "INTEGER DEFAULT 0"},
+            "tasks": {
+                "duration": "REAL",
+                "parent_task_id": "TEXT",
+                "trigger": "TEXT",
+                "external_task_id": "TEXT",
+                "end_inferred": "INTEGER DEFAULT 0",
+            },
             "retry_attempts": dict(RETRY_COLUMNS),
             "llm_calls": {
                 **RETRY_COLUMNS,
                 "attempt_kind": "TEXT DEFAULT 'round'",
                 "is_fallback": "INTEGER DEFAULT 0",
                 "response_model": "TEXT",
+                "input_text": "TEXT",
+                "output_text": "TEXT",
                 "end_inferred": "INTEGER DEFAULT 0",
             },
             "tool_calls": {"duration": "REAL", "end_inferred": "INTEGER DEFAULT 0"},
@@ -224,7 +234,7 @@ class EventStore:
                 "CREATE INDEX IF NOT EXISTS ix_tool_calls_task ON tool_calls(task_id, sequence)",
             ):
                 db.execute(statement)
-            db.execute("PRAGMA user_version=3")
+            db.execute("PRAGMA user_version=4")
         self._cleanup_sync()
 
     def _cleanup_sync(self):
@@ -322,8 +332,8 @@ class EventStore:
         if kind == "task_start":
             db.execute(
                 """INSERT OR IGNORE INTO tasks
-                (task_id,created_at,status,umo,platform_name,platform_id,message_type,sender_id,sender_name,group_id,conversation_id)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (task_id,created_at,status,umo,platform_name,platform_id,message_type,sender_id,sender_name,group_id,conversation_id,parent_task_id,trigger,external_task_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     p["task_id"],
                     p["created_at"],
@@ -336,6 +346,9 @@ class EventStore:
                     p.get("sender_name", ""),
                     p.get("group_id", ""),
                     p.get("conversation_id", ""),
+                    p.get("parent_task_id"),
+                    p.get("trigger", ""),
+                    p.get("external_task_id", ""),
                 ),
             )
             return
@@ -398,6 +411,7 @@ class EventStore:
                 ),
             )
             self._write_retry_fields(db, "llm_calls", p)
+            self._write_text_fields(db, "llm_calls", p)
             return
         elif kind == "llm_end":
             usage = p.get("usage") or {}
@@ -417,6 +431,7 @@ class EventStore:
                     p["id"],
                 ),
             )
+            self._write_text_fields(db, "llm_calls", p)
         elif kind == "attempt_start":
             db.execute(
                 """INSERT INTO retry_attempts
@@ -500,6 +515,23 @@ class EventStore:
                 f"UPDATE {table} SET {columns} WHERE id=?", (*fields.values(), payload["id"])
             )
 
+    def _write_text_fields(self, db, table, payload):
+        fields = {}
+        for key in ("input_text", "output_text"):
+            if key not in payload:
+                continue
+            value = payload[key]
+            if key == "input_text" and not isinstance(value, str):
+                value = safe_json(value, self.max_text_chars, self.redact_secrets)
+            else:
+                value = redact_text(str(value or ""), self.max_text_chars, self.redact_secrets)
+            fields[key] = value
+        if fields:
+            columns = ",".join(key + "=?" for key in fields)
+            db.execute(
+                f"UPDATE {table} SET {columns} WHERE id=?", (*fields.values(), payload["id"])
+            )
+
     def enqueue_recovered(self, task_id, reason):
         return self.enqueue(
             "task_recover", dict(task_id=task_id, reason=reason, finished_at=time.time())
@@ -524,16 +556,24 @@ class EventStore:
         if status:
             parts.append("t.status=?")
             args.append(status)
-        if platform:
-            parts.append("t.platform_name=?")
-            args.append(platform)
-        if model:
-            pattern = (
-                "%" + model.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            )
-            parts.append(r"""(t.provider_model LIKE ? ESCAPE '\' OR EXISTS (SELECT 1 FROM llm_calls c
-                WHERE c.task_id=t.task_id AND (c.provider_model LIKE ? ESCAPE '\' OR c.response_model LIKE ? ESCAPE '\')))""")
-            args.extend([pattern, pattern, pattern])
+        platforms = (
+            platform if isinstance(platform, (list, tuple)) else [platform] if platform else []
+        )
+        if platforms:
+            parts.append("t.platform_name IN (" + ",".join("?" for _ in platforms) + ")")
+            args.extend(platforms)
+        models = model if isinstance(model, (list, tuple)) else [model] if model else []
+        if models:
+            clauses = []
+            for value in models:
+                value = str(value)
+                pattern = (
+                    "%" + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+                )
+                clauses.append(r"""(t.provider_model LIKE ? ESCAPE '\' OR EXISTS (SELECT 1 FROM llm_calls c
+                    WHERE c.task_id=t.task_id AND (c.provider_model LIKE ? ESCAPE '\' OR c.response_model LIKE ? ESCAPE '\')))""")
+                args.extend([pattern, pattern, pattern])
+            parts.append("(" + " OR ".join(clauses) + ")")
         return (" WHERE " + " AND ".join(parts) if parts else ""), args
 
     async def list_tasks(self, limit=50, offset=0, status="", model="", platform="", hours=24):
@@ -574,8 +614,64 @@ class EventStore:
                 )
             ]
 
+    async def filter_options(self, hours=24):
+        return await self._read(self._filter_options_sync, hours)
+
+    def _filter_options_sync(self, hours):
+        where, args = self._where(hours=hours)
+        with closing(self._connect_read()) as db:
+            platforms = [
+                row[0]
+                for row in db.execute(
+                    "SELECT DISTINCT t.platform_name FROM tasks t"
+                    + where
+                    + " AND t.platform_name != '' ORDER BY t.platform_name",
+                    args,
+                ).fetchall()
+            ]
+            models = set()
+            for column in ("provider_model", "response_model"):
+                source = "c"
+                query = (
+                    "SELECT DISTINCT "
+                    + source
+                    + "."
+                    + column
+                    + " FROM llm_calls c JOIN tasks t ON t.task_id=c.task_id"
+                    + where
+                    + " AND "
+                    + source
+                    + "."
+                    + column
+                    + " != ''"
+                )
+                models.update(row[0] for row in db.execute(query, args).fetchall())
+            models.update(
+                row[0]
+                for row in db.execute(
+                    "SELECT DISTINCT t.provider_model FROM tasks t"
+                    + where
+                    + " AND t.provider_model != ''",
+                    args,
+                ).fetchall()
+            )
+            models = sorted(models)
+        return dict(models=models, platforms=platforms)
+
     async def get_task(self, task_id):
         return await self._read(self._get_task_sync, task_id)
+
+    async def latest_task_identity(self, umo):
+        return await self._read(self._latest_task_identity_sync, umo)
+
+    def _latest_task_identity_sync(self, umo):
+        with closing(self._connect_read()) as db:
+            row = db.execute(
+                """SELECT platform_name,platform_id,message_type,sender_id,sender_name,group_id
+                FROM tasks WHERE umo=? ORDER BY created_at DESC LIMIT 1""",
+                (umo,),
+            ).fetchone()
+            return dict(row) if row else None
 
     def _get_task_sync(self, task_id):
         with closing(self._connect_read()) as db:
