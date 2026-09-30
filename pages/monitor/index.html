@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LLM 负载监控</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; padding: 20px; background: Canvas; color: CanvasText; }
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+    input, select, button { padding: 7px 9px; border: 1px solid GrayText; border-radius: 6px; background: Canvas; color: CanvasText; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 8px; border-bottom: 1px solid GrayText; text-align: left; vertical-align: top; }
+    tr:hover { background: color-mix(in srgb, CanvasText 8%, Canvas); cursor: pointer; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; }
+    .muted { opacity: .7; }
+    #detail { margin-top: 20px; }
+  </style>
+</head>
+<body>
+  <h2>LLM 负载监控</h2>
+  <div class="toolbar">
+    <select id="status"><option value="">全部状态</option><option>running</option><option>completed</option><option>aborted</option><option>error</option></select>
+    <button id="refresh">刷新</button>
+    <button id="check">自检</button>
+    <span id="meta" class="muted"></span>
+  </div>
+  <pre id="check-result" class="muted"></pre>
+  <table><thead><tr><th>时间</th><th>渠道 / 用户</th><th>模型</th><th>状态</th><th>任务</th></tr></thead><tbody id="rows"></tbody></table>
+  <section id="detail"></section>
+  <script>
+    const bridge = window.AstrBotPluginPage;
+    const rows = document.getElementById('rows');
+    const detail = document.getElementById('detail');
+    const esc = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const when = (value) => value ? new Date(Number(value) * 1000).toLocaleString() : '';
+    async function load() {
+      const status = document.getElementById('status').value;
+      const query = status ? {status} : {};
+      const [result, summary] = await Promise.all([bridge.apiGet('tasks', query), bridge.apiGet('summary', {hours: 24})]);
+      rows.innerHTML = (result.items || []).map(item => `<tr data-id="${esc(item.task_id)}"><td>${esc(when(item.created_at))}</td><td>${esc(item.platform_name)} / ${esc(item.sender_name || item.sender_id)}<br><span class="muted">${esc(item.umo)}</span></td><td>${esc(item.provider_model || item.provider_id)}</td><td>${esc(item.status)}</td><td>${esc(item.task_id.slice(0, 10))}</td></tr>`).join('');
+      document.querySelectorAll('tr[data-id]').forEach(row => row.onclick = () => show(row.dataset.id));
+      document.getElementById('meta').textContent = `${(result.items || []).length} 条 · 24h ${summary.total_tokens || 0} tokens · ${summary.llm_calls || 0} calls`;
+    }
+    async function show(id) {
+      const result = await bridge.apiGet(`tasks/${encodeURIComponent(id)}`);
+      if (!result.task) return;
+      detail.innerHTML = `<h3>任务详情</h3><p>${esc(result.task.umo)} · ${esc(result.task.status)} · ${esc(result.task.provider_model)}</p>` +
+        `<h4>LLM 调用</h4>${(result.llm_calls || []).map(call => `<details><summary>#${call.sequence} ${esc(call.provider_model)} · ${esc(call.status)} · ${esc(call.duration)}s</summary><pre>${esc(JSON.stringify(call, null, 2))}</pre></details>`).join('')}` +
+        `<h4>工具调用</h4>${(result.tool_calls || []).map(call => `<details><summary>#${call.sequence} ${esc(call.tool_name)} · ${esc(call.status)} · ${esc(call.duration)}s</summary><strong>输入</strong><pre>${esc(call.input_json)}</pre><strong>输出</strong><pre>${esc(call.output_json)}</pre></details>`).join('')}`;
+    }
+    document.getElementById('refresh').onclick = load;
+    document.getElementById('status').onchange = load;
+    document.getElementById('check').onclick = async () => {
+      const result = await bridge.apiGet('self-check');
+      document.getElementById('check-result').textContent = JSON.stringify(result, null, 2);
+    };
+    await bridge.ready();
+    await load();
+    setInterval(load, 5000);
+  </script>
+</body>
+</html>

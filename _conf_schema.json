@@ -1,0 +1,31 @@
+{
+  "monitor": {
+    "type": "object",
+    "description": "监控设置",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用监控采集",
+        "default": true
+      },
+      "max_text_chars": {
+        "type": "int",
+        "description": "工具输入输出最大保存字符数",
+        "hint": "超出部分会被截断；0 表示使用 20000 字符默认值。",
+        "default": 20000,
+        "slider": {"min": 1000, "max": 100000, "step": 1000}
+      },
+      "retention_days": {
+        "type": "int",
+        "description": "数据保留天数",
+        "default": 30,
+        "slider": {"min": 1, "max": 365, "step": 1}
+      },
+      "redact_secrets": {
+        "type": "bool",
+        "description": "脱敏常见密钥字段",
+        "default": true
+      }
+    }
+  }
+}
