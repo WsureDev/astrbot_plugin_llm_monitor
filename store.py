@@ -74,6 +74,8 @@ class EventStore:
                     input_other INTEGER DEFAULT 0,
                     input_cached INTEGER DEFAULT 0,
                     output INTEGER DEFAULT 0,
+                    attempt_kind TEXT DEFAULT 'round',
+                    is_fallback INTEGER DEFAULT 0,
                     error TEXT
                 );
                 CREATE TABLE IF NOT EXISTS tool_calls (
@@ -102,6 +104,14 @@ class EventStore:
                 db.execute("ALTER TABLE tool_calls ADD COLUMN duration REAL")
             except sqlite3.OperationalError:
                 pass
+            for statement in (
+                "ALTER TABLE llm_calls ADD COLUMN attempt_kind TEXT DEFAULT 'round'",
+                "ALTER TABLE llm_calls ADD COLUMN is_fallback INTEGER DEFAULT 0",
+            ):
+                try:
+                    db.execute(statement)
+                except sqlite3.OperationalError:
+                    pass
             cutoff = time.time() - max(1, self.retention_days) * 86400
             db.execute("DELETE FROM tasks WHERE created_at < ?", (cutoff,))
             db.execute("DELETE FROM llm_calls WHERE started_at < ?", (cutoff,))
@@ -171,8 +181,9 @@ class EventStore:
             elif kind == "llm_start":
                 db.execute(
                     """INSERT OR REPLACE INTO llm_calls
-                    (id, task_id, sequence, started_at, status, provider_id, provider_model)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (id, task_id, sequence, started_at, status, provider_id, provider_model,
+                     attempt_kind, is_fallback)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         payload.get("id"),
                         payload.get("task_id"),
@@ -181,6 +192,8 @@ class EventStore:
                         "running",
                         payload.get("provider_id", ""),
                         payload.get("provider_model", ""),
+                        payload.get("attempt_kind", "round"),
+                        int(bool(payload.get("is_fallback", False))),
                     ),
                 )
             elif kind == "llm_end":
@@ -188,7 +201,7 @@ class EventStore:
                 db.execute(
                     """UPDATE llm_calls SET finished_at = ?, status = ?, duration = ?, ttft = ?,
                     provider_id = ?, provider_model = ?, input_other = ?, input_cached = ?,
-                    output = ?, error = ? WHERE id = ?""",
+                    output = ?, attempt_kind = ?, is_fallback = ?, error = ? WHERE id = ?""",
                     (
                         payload.get("finished_at"),
                         payload.get("status", "completed"),
@@ -199,6 +212,8 @@ class EventStore:
                         int(usage.get("input_other", 0) or 0),
                         int(usage.get("input_cached", 0) or 0),
                         int(usage.get("output", 0) or 0),
+                        payload.get("attempt_kind", "round"),
+                        int(bool(payload.get("is_fallback", False))),
                         payload.get("error", ""),
                         payload.get("id"),
                     ),
@@ -266,7 +281,10 @@ class EventStore:
         with sqlite3.connect(self.path) as db:
             db.row_factory = sqlite3.Row
             rows = db.execute(
-                f"SELECT * FROM tasks {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                f"""SELECT tasks.*,
+                (SELECT COUNT(*) FROM llm_calls WHERE llm_calls.task_id = tasks.task_id) AS llm_call_count,
+                (SELECT COUNT(*) FROM tool_calls WHERE tool_calls.task_id = tasks.task_id) AS tool_call_count
+                FROM tasks {where} ORDER BY created_at DESC LIMIT ? OFFSET ?""",
                 [*args, limit, offset],
             ).fetchall()
             return {"items": [dict(row) for row in rows], "limit": limit, "offset": offset}
@@ -278,9 +296,10 @@ class EventStore:
                 "SELECT COUNT(*), COALESCE(SUM(status = 'running'), 0) FROM tasks WHERE created_at >= ?",
                 (cutoff,),
             ).fetchone()
-            calls, input_other, input_cached, output = db.execute(
+            calls, input_other, input_cached, output, failed_calls, fallback_calls = db.execute(
                 """SELECT COUNT(*), COALESCE(SUM(input_other), 0),
-                COALESCE(SUM(input_cached), 0), COALESCE(SUM(output), 0)
+                COALESCE(SUM(input_cached), 0), COALESCE(SUM(output), 0),
+                COALESCE(SUM(status = 'error'), 0), COALESCE(SUM(is_fallback), 0)
                 FROM llm_calls WHERE started_at >= ?""",
                 (cutoff,),
             ).fetchone()
@@ -292,6 +311,8 @@ class EventStore:
             "input_other": int(input_other or 0),
             "input_cached": int(input_cached or 0),
             "output": int(output or 0),
+            "failed_calls": int(failed_calls or 0),
+            "fallback_calls": int(fallback_calls or 0),
             "total_tokens": int(input_other or 0) + int(input_cached or 0) + int(output or 0),
         }
 

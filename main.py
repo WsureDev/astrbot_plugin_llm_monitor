@@ -113,6 +113,11 @@ class RunnerProbe:
                 task_id = plugin._task_id(event)
                 call_id = uuid.uuid4().hex
                 sequence = plugin._next_llm_sequence(task_id)
+                first_provider = plugin._llm_first_provider.setdefault(task_id, provider_id)
+                is_fallback = bool(
+                    first_provider and provider_id and provider_id != first_provider
+                )
+                attempt_kind = "fallback" if is_fallback else "round"
                 plugin._safe_enqueue(
                     "llm_start",
                     {
@@ -122,6 +127,8 @@ class RunnerProbe:
                         "started_at": started,
                         "provider_id": provider_id,
                         "provider_model": effective_model,
+                        "attempt_kind": attempt_kind,
+                        "is_fallback": is_fallback,
                     },
                 )
                 try:
@@ -154,6 +161,8 @@ class RunnerProbe:
                             "ttft": max(0.0, first_token_at - started) if first_token_at else 0.0,
                             "provider_id": provider_id,
                             "provider_model": effective_model,
+                            "attempt_kind": attempt_kind,
+                            "is_fallback": is_fallback,
                             "usage": response_usage,
                             "error": error_text,
                         },
@@ -230,6 +239,7 @@ class LLMMonitorPlugin(Star):
         self.probe = RunnerProbe(self)
         self.self_check: dict[str, Any] = {}
         self._llm_sequences: dict[str, int] = {}
+        self._llm_first_provider: dict[str, str] = {}
         self._tool_sequences: dict[str, int] = {}
         self._started = False
 

@@ -11,3 +11,5 @@ python -m compileall -q .
 ```
 
 安装后在 AstrBot WebUI 的插件详情页打开 `monitor` 页面，使用 self-check 查看探针状态。
+
+页面会显示运行中任务的动态耗时、失败尝试和可观测的 fallback Provider。Provider 适配器内部的 HTTP 重试属于 Provider 内部实现，当前按一次逻辑 Provider 调用统计。
