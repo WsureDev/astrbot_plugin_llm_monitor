@@ -55,9 +55,14 @@
       const result = await bridge.apiGet('self-check');
       document.getElementById('check-result').textContent = JSON.stringify(result, null, 2);
     };
-    await bridge.ready();
-    await load();
-    setInterval(load, 5000);
+    async function init() {
+      await bridge.ready();
+      await load();
+      setInterval(load, 5000);
+    }
+    init().catch(error => {
+      document.getElementById('meta').textContent = `初始化失败: ${error}`;
+    });
   </script>
 </body>
 </html>
