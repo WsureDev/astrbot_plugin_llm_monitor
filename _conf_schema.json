@@ -8,6 +8,12 @@
         "description": "启用监控采集",
         "default": true
       },
+      "strip_thinking_blocks": {
+        "type": "bool",
+        "description": "过滤回复中的 thinking/think 块",
+        "hint": "默认开启，独立于监控采集开关。非流式回复分段前，删除同一文本消息段内完整的 <thinking>…</thinking> 和 <think>…</think> 块，包括空块和多行内容；不处理流式输出。",
+        "default": true
+      },
       "max_text_chars": {
         "type": "int",
         "description": "工具输入输出最大保存字符数",

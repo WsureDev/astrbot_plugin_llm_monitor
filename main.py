@@ -13,6 +13,7 @@ from typing import Any
 from astrbot import __version__
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import Plain
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.api.web import json_response, request
 
@@ -25,6 +26,10 @@ TASK_STATE_EXTRA = f"{PLUGIN_NAME}.task_state"
 RECONCILE_INTERVAL_SECONDS = 60
 RECONCILE_STARTUP_DELAY_SECONDS = 5
 RECONCILE_GRACE_SECONDS = 15
+THINKING_BLOCK = re.compile(
+    r"<(thinking|think)\b[^>]*>.*?</\1\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _now() -> float:
@@ -462,6 +467,20 @@ class LLMMonitorPlugin(Star):
             "status": "running",
         }
 
+    @filter.on_decorating_result(priority=-1000)
+    async def on_decorating_result(self, event: AstrMessageEvent) -> None:
+        """Remove complete thinking blocks before non-streaming reply splitting."""
+        if not self._cfg("strip_thinking_blocks", True):
+            return
+        result = event.get_result()
+        if result is None:
+            return
+        for component in result.chain:
+            if isinstance(component, Plain):
+                cleaned = THINKING_BLOCK.sub("", component.text)
+                if cleaned != component.text:
+                    component.text = cleaned.strip()
+
     @filter.on_waiting_llm_request()
     async def on_waiting_llm(self, event: AstrMessageEvent) -> None:
         try:
@@ -557,7 +576,7 @@ class LLMMonitorPlugin(Star):
             logger.exception("[%s] tool end hook failed", PLUGIN_NAME)
 
     async def health(self):
-        return json_response({"ok": True, "plugin": PLUGIN_NAME, "version": "0.1.0", "started": self._started})
+        return json_response({"ok": True, "plugin": PLUGIN_NAME, "version": "0.1.1", "started": self._started})
 
     async def self_check_api(self):
         self.self_check = self._build_self_check()
