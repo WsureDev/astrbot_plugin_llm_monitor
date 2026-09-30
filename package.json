@@ -1,0 +1,13 @@
+{
+  "name": "astrbot-plugin-llm-monitor-dev",
+  "private": true,
+  "scripts": {
+    "test:ui": "node tests/browser.cjs",
+    "format": "prettier --write pages/monitor tests/browser.cjs package.json .github/workflows/test.yml",
+    "format:check": "prettier --check pages/monitor tests/browser.cjs package.json .github/workflows/test.yml"
+  },
+  "devDependencies": {
+    "playwright": "1.55.0",
+    "prettier": "3.6.2"
+  }
+}
