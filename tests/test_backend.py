@@ -309,6 +309,15 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
         await self.store.flush()
         self.assertIn("response_model", (await self.store.get_task("existing"))["llm_calls"][0])
 
+    async def test_startup_backfills_legacy_task_model(self):
+        self.task("legacy")
+        self.llm(task_id="legacy")
+        await self.store.flush()
+        await self.store.close()
+        await self.store.start()
+        record = await self.store.get_task("legacy")
+        self.assertEqual(record["task"]["provider_model"], "model-a")
+
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

@@ -234,6 +234,24 @@ class EventStore:
                 "CREATE INDEX IF NOT EXISTS ix_tool_calls_task ON tool_calls(task_id, sequence)",
             ):
                 db.execute(statement)
+            # Older versions recorded the model only on llm_calls. Repair those
+            # task headers on startup without overwriting explicit task values.
+            db.execute(
+                """UPDATE tasks SET
+                provider_id=COALESCE(NULLIF(provider_id,''),(
+                    SELECT c.provider_id FROM llm_calls c
+                    WHERE c.task_id=tasks.task_id AND c.provider_id != ''
+                    ORDER BY c.sequence LIMIT 1)),
+                provider_model=COALESCE(NULLIF(provider_model,''),(
+                    SELECT c.provider_model FROM llm_calls c
+                    WHERE c.task_id=tasks.task_id AND c.provider_model != ''
+                    ORDER BY c.sequence LIMIT 1))
+                WHERE (provider_model IS NULL OR provider_model='')
+                AND EXISTS (
+                    SELECT 1 FROM llm_calls c
+                    WHERE c.task_id=tasks.task_id AND c.provider_model != ''
+                )"""
+            )
             db.execute("PRAGMA user_version=4")
         self._cleanup_sync()
 
