@@ -619,13 +619,15 @@ class EventStore:
 
     def _filter_options_sync(self, hours):
         where, args = self._where(hours=hours)
+        conjunction = " AND " if where else " WHERE "
         with closing(self._connect_read()) as db:
             platforms = [
                 row[0]
                 for row in db.execute(
                     "SELECT DISTINCT t.platform_name FROM tasks t"
                     + where
-                    + " AND t.platform_name != '' ORDER BY t.platform_name",
+                    + conjunction
+                    + "t.platform_name != '' ORDER BY t.platform_name",
                     args,
                 ).fetchall()
             ]
@@ -639,7 +641,7 @@ class EventStore:
                     + column
                     + " FROM llm_calls c JOIN tasks t ON t.task_id=c.task_id"
                     + where
-                    + " AND "
+                    + conjunction
                     + source
                     + "."
                     + column
@@ -651,7 +653,8 @@ class EventStore:
                 for row in db.execute(
                     "SELECT DISTINCT t.provider_model FROM tasks t"
                     + where
-                    + " AND t.provider_model != ''",
+                    + conjunction
+                    + "t.provider_model != ''",
                     args,
                 ).fetchall()
             )
