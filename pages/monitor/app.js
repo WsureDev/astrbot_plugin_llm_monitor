@@ -311,47 +311,148 @@ function retryDetails(item) {
   return html;
 }
 
-function renderAttempts(attempts, callId) {
-  return attempts
-    .map((attempt) => {
-      const layer =
-        {
-          provider: "Provider 适配器",
-          request: "请求重试器",
-          http: "SDK/HTTP",
-        }[attempt.layer] || attempt.layer;
-      return (
-        '<details data-key="attempt-' +
-        esc(attempt.id) +
-        '"><summary>' +
-        badge(attempt.status) +
-        " " +
-        esc(layer) +
-        " · 尝试 #" +
-        num(attempt.attempt_number) +
-        (attempt.is_retry ? " " + badge("retry", "Retry") : "") +
-        (attempt.http_status ? " · HTTP " + num(attempt.http_status) : "") +
-        " · " +
-        clock(attempt) +
-        '</summary><div class="payload"><div class="secondary">' +
-        esc(attempt.operation || "") +
-        " · " +
-        esc(when(attempt.started_at)) +
-        "</div>" +
-        retryDetails(attempt) +
-        (attempt.error
-          ? "<label>错误</label><pre>" + esc(attempt.error) + "</pre>"
-          : "") +
-        (attempt.end_inferred
-          ? '<p class="muted">结束状态由父任务推断。</p>'
-          : "") +
-        "</div></details>"
-      );
-    })
-    .join("");
+function retryLayer(attempt) {
+  return (
+    {
+      provider: "Provider 适配器",
+      request: "请求重试器",
+      http: "SDK/HTTP",
+    }[attempt.layer] ||
+    attempt.layer ||
+    "重试层"
+  );
 }
 
-function renderCall(call) {
+function retryWaitStatus(value) {
+  return (
+    {
+      waiting: "等待中",
+      completed: "等待结束",
+      cancelled: "等待已取消",
+    }[value] ||
+    value ||
+    ""
+  );
+}
+
+function retryGroups(attempts, callId) {
+  const relevant = attempts
+    .filter(
+      (attempt) =>
+        attempt.llm_call_id === callId &&
+        (attempt.is_retry || Number(attempt.attempt_number || 1) > 1),
+    )
+    .sort((a, b) => Number(a.started_at || 0) - Number(b.started_at || 0));
+  const ids = new Set(relevant.map((attempt) => attempt.id));
+  const byParent = new Map();
+  for (const attempt of relevant) {
+    if (!byParent.has(attempt.parent_id)) byParent.set(attempt.parent_id, []);
+    byParent.get(attempt.parent_id).push(attempt);
+  }
+  const grouped = [];
+  const assigned = new Set();
+  const roots = relevant.filter((attempt) => !ids.has(attempt.parent_id));
+  const visit = (root) => {
+    if (assigned.has(root.id)) return;
+    const group = [];
+    const queue = [root];
+    while (queue.length) {
+      const current = queue.shift();
+      if (!current || assigned.has(current.id)) continue;
+      assigned.add(current.id);
+      group.push(current);
+      queue.push(...(byParent.get(current.id) || []));
+    }
+    if (group.length) grouped.push(group);
+  };
+  roots.forEach(visit);
+  relevant.forEach(visit);
+  return grouped;
+}
+
+function renderRetryChain(attempts, callId) {
+  const groups = retryGroups(attempts, callId);
+  if (!groups.length) return "";
+  return (
+    '<section class="retry-chain" aria-label="重试链"><div class="retry-chain-title">重试链</div>' +
+    groups
+      .map((group, index) => {
+        const layers = [...new Set(group.map(retryLayer))].join(" → ");
+        const retryNumber =
+          group.find((attempt) => attempt.layer === "provider")
+            ?.attempt_number ||
+          group[0].attempt_number ||
+          index + 2;
+        const waits = group.filter((attempt) => attempt.retry_wait != null);
+        const wait = waits.length
+          ? " · 实际等待 " + seconds(waits[0].retry_wait)
+          : "";
+        const plannedAttempt = group.find(
+          (attempt) => attempt.retry_wait_planned != null,
+        );
+        const planned = plannedAttempt
+          ? " · 计划 " + seconds(plannedAttempt.retry_wait_planned)
+          : "";
+        const statusAttempt = group.find(
+          (attempt) => attempt.retry_wait_status,
+        );
+        const waitStatus = statusAttempt
+          ? " · " + retryWaitStatus(statusAttempt.retry_wait_status)
+          : "";
+        const httpAttempt = [...group]
+          .reverse()
+          .find((attempt) => attempt.http_status != null);
+        const http = httpAttempt
+          ? " · HTTP " + num(httpAttempt.http_status)
+          : "";
+        const reasons = group
+          .filter((attempt) => attempt.retry_reason)
+          .map((attempt) => retryLayer(attempt) + "：" + attempt.retry_reason);
+        const errors = group
+          .filter((attempt) => attempt.error)
+          .map((attempt) => retryLayer(attempt) + "：" + attempt.error);
+        return (
+          '<div class="retry-entry" data-key="retry-' +
+          esc(group[0].id) +
+          '"><div class="retry-entry-head">' +
+          badge(group[group.length - 1].status) +
+          " Retry #" +
+          (index + 1) +
+          " · 尝试 #" +
+          num(retryNumber) +
+          " · " +
+          esc(layers) +
+          http +
+          '</div><div class="retry-entry-meta">' +
+          esc(
+            group
+              .map((attempt) => attempt.operation)
+              .filter(Boolean)
+              .join(" → ") || when(group[0].started_at),
+          ) +
+          wait +
+          planned +
+          waitStatus +
+          "</div>" +
+          (reasons.length
+            ? '<div class="retry-reason"><span>原因：</span>' +
+              esc(reasons.join("；")) +
+              "</div>"
+            : "") +
+          (errors.length
+            ? '<div class="retry-reason"><span>错误：</span>' +
+              esc(errors.join("；")) +
+              "</div>"
+            : "") +
+          "</div>"
+        );
+      })
+      .join("") +
+    "</section>"
+  );
+}
+
+function renderCall(call, attempts) {
   return (
     '<details data-key="llm-' +
     esc(call.id) +
@@ -390,6 +491,7 @@ function renderCall(call) {
     num(call.attempt_number || 1) +
     "</div>" +
     retryDetails(call) +
+    renderRetryChain(attempts, call.id) +
     "<label>输入（来自 AstrBot 上下文）</label><pre>" +
     esc(call.input_text || "未采集") +
     "</pre><label>输出</label><pre>" +
@@ -452,15 +554,9 @@ function renderDetail(result) {
     0,
   );
   const timeline = calls
-    .map((call) => ({ at: call.started_at, html: renderCall(call) }))
+    .map((call) => ({ at: call.started_at, html: renderCall(call, attempts) }))
     .concat(
       tools.map((tool) => ({ at: tool.started_at, html: renderTool(tool) })),
-    )
-    .concat(
-      attempts.map((attempt) => ({
-        at: attempt.started_at,
-        html: renderAttempts([attempt], attempt.llm_call_id),
-      })),
     )
     .sort((a, b) => a.at - b.at);
   byId("detail").innerHTML =
@@ -664,6 +760,35 @@ byId("pause").addEventListener("click", () => {
   if (!state.paused) refresh();
 });
 byId("check").addEventListener("click", selfCheck);
+function closeFilterMenus() {
+  for (const kind of ["model", "platform"]) {
+    const filter = byId(kind + "-filter");
+    const menu = byId(kind + "-options");
+    const toggle = byId(kind + "-toggle");
+    filter.classList.remove("open");
+    menu.hidden = true;
+    toggle.setAttribute("aria-expanded", "false");
+  }
+}
+function toggleFilterMenu(kind) {
+  const menu = byId(kind + "-options");
+  const willOpen = menu.hidden;
+  closeFilterMenus();
+  if (willOpen) {
+    byId(kind + "-filter").classList.add("open");
+    menu.hidden = false;
+    byId(kind + "-toggle").setAttribute("aria-expanded", "true");
+  }
+}
+for (const kind of ["model", "platform"]) {
+  byId(kind + "-toggle").addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleFilterMenu(kind);
+  });
+}
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".filter-select")) closeFilterMenus();
+});
 byId("close-detail").addEventListener("click", () =>
   byId("task-dialog").close(),
 );

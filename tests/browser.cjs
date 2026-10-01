@@ -179,9 +179,11 @@ const pageRoot = path.resolve(__dirname, "../pages/monitor");
                   parent_id: null,
                   layer: "provider",
                   status: "completed",
-                  attempt_number: 1,
+                  is_retry: true,
+                  attempt_number: 2,
                   started_at: snapshot.started_at,
                   duration: 1,
+                  retry_reason: "provider adapter retry",
                 },
                 {
                   id: "request-1",
@@ -259,9 +261,6 @@ const pageRoot = path.resolve(__dirname, "../pages/monitor");
       .first()
       .locator(":scope > summary")
       .click();
-    for (const id of ["adapter-1", "request-1", "http-1"]) {
-      await page.locator('[data-key="attempt-' + id + '"] > summary').click();
-    }
     await page.evaluate(async () => {
       fixture.completed = true;
       await refresh();
@@ -299,25 +298,21 @@ const pageRoot = path.resolve(__dirname, "../pages/monitor");
         .count(),
       1,
     );
+    assert.equal(await page.locator('[data-key^="attempt-"]').count(), 0);
     assert.equal(
-      await page.locator('[data-key="attempt-adapter-1"]').count(),
+      await page.locator('[data-key="llm-call-1"] .retry-entry').count(),
       1,
-    );
-    assert.equal(
-      await page.locator('[data-key="attempt-request-1"]').count(),
-      1,
-    );
-    assert.equal(await page.locator('[data-key="attempt-http-1"]').count(), 1);
-    assert.equal(
-      await page.locator('[data-key="attempt-http-1"]').getAttribute("open"),
-      "",
     );
     assert.match(
-      await page.locator('[data-key="attempt-request-1"]').textContent(),
+      await page.locator('[data-key="llm-call-1"]').textContent(),
+      /Provider 适配器/,
+    );
+    assert.match(
+      await page.locator('[data-key="llm-call-1"]').textContent(),
       /等待已取消/,
     );
     assert.match(
-      await page.locator('[data-key="attempt-http-1"]').textContent(),
+      await page.locator('[data-key="llm-call-1"]').textContent(),
       /HTTP 200/,
     );
     checks.push(
@@ -372,6 +367,19 @@ const pageRoot = path.resolve(__dirname, "../pages/monitor");
     );
     checks.push(
       "stale list response discarded; list and summary share filters",
+    );
+
+    await page.locator("#model-toggle").click();
+    assert.equal(await page.locator("#model-options").isVisible(), true);
+    await page.locator('#model-options input[value="test-model"]').check();
+    assert.match(await page.locator("#model-label").textContent(), /已选 \d+/);
+    await page.locator("#platform-toggle").click();
+    assert.equal(await page.locator("#model-options").isVisible(), false);
+    assert.equal(await page.locator("#platform-options").isVisible(), true);
+    await page.locator("body").click({ position: { x: 1200, y: 20 } });
+    assert.equal(await page.locator("#platform-options").isVisible(), false);
+    checks.push(
+      "custom model and platform dropdowns open, select, and close correctly",
     );
 
     await page.evaluate(async () => {

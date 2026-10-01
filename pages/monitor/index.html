@@ -43,24 +43,46 @@
             <option value="recovered">异常恢复</option>
           </select></label
         >
-        <details class="multi-filter" id="model-filter">
-          <summary id="model-label">模型：全部</summary>
+        <div class="filter-select" id="model-filter">
+          <button
+            class="filter-toggle"
+            id="model-toggle"
+            type="button"
+            aria-haspopup="true"
+            aria-expanded="false"
+            aria-controls="model-options"
+          >
+            <span id="model-label">模型：全部</span
+            ><span class="filter-chevron" aria-hidden="true">⌄</span>
+          </button>
           <div
             class="multi-menu"
             id="model-options"
             role="group"
             aria-label="模型筛选"
+            hidden
           ></div>
-        </details>
-        <details class="multi-filter" id="platform-filter">
-          <summary id="platform-label">渠道：全部</summary>
+        </div>
+        <div class="filter-select" id="platform-filter">
+          <button
+            class="filter-toggle"
+            id="platform-toggle"
+            type="button"
+            aria-haspopup="true"
+            aria-expanded="false"
+            aria-controls="platform-options"
+          >
+            <span id="platform-label">渠道：全部</span
+            ><span class="filter-chevron" aria-hidden="true">⌄</span>
+          </button>
           <div
             class="multi-menu"
             id="platform-options"
             role="group"
             aria-label="渠道筛选"
+            hidden
           ></div>
-        </details>
+        </div>
         <button class="btn" type="submit" id="refresh">刷新</button>
         <button class="btn ghost" type="button" id="pause" aria-pressed="false">
           暂停自动刷新
