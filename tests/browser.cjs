@@ -373,6 +373,20 @@ const pageRoot = path.resolve(__dirname, "../pages/monitor");
     assert.equal(await page.locator("#model-options").isVisible(), true);
     await page.locator('#model-options input[value="test-model"]').check();
     assert.match(await page.locator("#model-label").textContent(), /已选 \d+/);
+    await page.locator('#model-options [data-filter-action="all"]').click();
+    assert.equal(
+      await page
+        .locator('#model-options input[type="checkbox"]:checked')
+        .count(),
+      3,
+    );
+    await page.locator('#model-options [data-filter-action="clear"]').click();
+    assert.equal(
+      await page
+        .locator('#model-options input[type="checkbox"]:checked')
+        .count(),
+      0,
+    );
     await page.locator("#platform-toggle").click();
     assert.equal(await page.locator("#model-options").isVisible(), false);
     assert.equal(await page.locator("#platform-options").isVisible(), true);

@@ -671,17 +671,64 @@ tr:hover {
   z-index: 5;
   top: calc(100% + 6px);
   left: 0;
-  min-width: 100%;
-  max-height: 260px;
-  padding: 8px;
+  min-width: 260px;
+  max-width: calc(100vw - 24px);
+  max-height: min(340px, 48vh);
+  padding: 7px;
   overflow: auto;
   background: var(--strong);
   border: 1px solid var(--line);
   border-radius: 10px;
   box-shadow: var(--shadow);
 }
+.filter-select.align-right .multi-menu {
+  right: 0;
+  left: auto;
+}
+.filter-select.open-up .multi-menu {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
 .multi-menu[hidden] {
   display: none;
+}
+.menu-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 8px 6px;
+  color: var(--text);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.menu-count {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.menu-actions {
+  display: flex;
+  gap: 6px;
+  padding: 7px 4px 5px;
+}
+.menu-actions button {
+  padding: 3px 7px;
+  color: var(--primary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.menu-actions button:hover {
+  background: rgba(88, 101, 242, 0.1);
+  border-color: rgba(88, 101, 242, 0.2);
+}
+.menu-options {
+  max-height: 235px;
+  overflow: auto;
+  scrollbar-width: thin;
 }
 .check-option {
   display: flex;
@@ -690,7 +737,9 @@ tr:hover {
   padding: 7px 6px;
   color: var(--text);
   font-size: 13px;
-  white-space: nowrap;
+  line-height: 1.25;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .check-option:hover {
   background: rgba(88, 101, 242, 0.1);

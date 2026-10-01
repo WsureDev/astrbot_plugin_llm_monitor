@@ -83,33 +83,49 @@ function renderFilterOptions(kind, values) {
   );
   for (const value of [...previous])
     if (!values.includes(value)) previous.delete(value);
-  menu.innerHTML = values.length
-    ? values
-        .map(
-          (value) =>
-            '<label class="check-option"><input type="checkbox" value="' +
-            esc(value) +
-            '"' +
-            (previous.has(value) ? " checked" : "") +
-            " /> <span>" +
-            esc(value) +
-            "</span></label>",
-        )
-        .join("")
-    : '<span class="empty-option">当前范围暂无选项</span>';
-  label.textContent =
-    (kind === "model" ? "模型" : "渠道") +
-    "：" +
-    (previous.size ? "已选 " + previous.size : "全部");
+  const title = kind === "model" ? "模型" : "渠道";
+  menu.innerHTML =
+    '<div class="menu-head"><strong>' +
+    title +
+    '筛选</strong><span class="menu-count"></span></div>' +
+    '<div class="menu-actions"><button type="button" data-filter-action="all">全选</button><button type="button" data-filter-action="clear">清空</button></div>' +
+    '<div class="menu-options" role="group">' +
+    (values.length
+      ? values
+          .map(
+            (value) =>
+              '<label class="check-option"><input type="checkbox" value="' +
+              esc(value) +
+              '"' +
+              (previous.has(value) ? " checked" : "") +
+              " /> <span>" +
+              esc(value) +
+              "</span></label>",
+          )
+          .join("")
+      : '<span class="empty-option">当前范围暂无选项</span>') +
+    "</div>";
+  const updateLabel = () => {
+    const checked = menu.querySelectorAll('input[type="checkbox"]:checked');
+    label.textContent =
+      title + "：" + (checked.length ? "已选 " + checked.length : "全部");
+    const count = menu.querySelector(".menu-count");
+    if (count) count.textContent = checked.length + " / " + values.length;
+  };
+  updateLabel();
   for (const checkbox of menu.querySelectorAll('input[type="checkbox"]')) {
     checkbox.addEventListener("change", () => {
-      byId(kind + "-label").textContent =
-        (kind === "model" ? "模型" : "渠道") +
-        "：" +
-        (menu.querySelectorAll('input[type="checkbox"]:checked').length
-          ? "已选 " +
-            menu.querySelectorAll('input[type="checkbox"]:checked').length
-          : "全部");
+      updateLabel();
+      state.offset = 0;
+      refresh();
+    });
+  }
+  for (const button of menu.querySelectorAll("[data-filter-action]")) {
+    button.addEventListener("click", () => {
+      const checked = button.dataset.filterAction === "all";
+      for (const checkbox of menu.querySelectorAll('input[type="checkbox"]'))
+        checkbox.checked = checked;
+      updateLabel();
       state.offset = 0;
       refresh();
     });
@@ -766,9 +782,28 @@ function closeFilterMenus() {
     const menu = byId(kind + "-options");
     const toggle = byId(kind + "-toggle");
     filter.classList.remove("open");
+    filter.classList.remove("align-right", "open-up");
     menu.hidden = true;
+    menu.style.width = "";
     toggle.setAttribute("aria-expanded", "false");
   }
+}
+function positionFilterMenu(kind) {
+  const filter = byId(kind + "-filter");
+  const menu = byId(kind + "-options");
+  if (menu.hidden) return;
+  const rect = filter.getBoundingClientRect();
+  const width = Math.min(
+    Math.max(rect.width, 260),
+    Math.max(220, innerWidth - 24),
+  );
+  menu.style.width = width + "px";
+  filter.classList.toggle("align-right", rect.left + width > innerWidth - 12);
+  const menuHeight = menu.getBoundingClientRect().height;
+  filter.classList.toggle(
+    "open-up",
+    rect.bottom + menuHeight > innerHeight - 12 && rect.top > menuHeight + 12,
+  );
 }
 function toggleFilterMenu(kind) {
   const menu = byId(kind + "-options");
@@ -778,6 +813,7 @@ function toggleFilterMenu(kind) {
     byId(kind + "-filter").classList.add("open");
     menu.hidden = false;
     byId(kind + "-toggle").setAttribute("aria-expanded", "true");
+    requestAnimationFrame(() => positionFilterMenu(kind));
   }
 }
 for (const kind of ["model", "platform"]) {
@@ -789,6 +825,19 @@ for (const kind of ["model", "platform"]) {
 document.addEventListener("click", (event) => {
   if (!event.target.closest(".filter-select")) closeFilterMenus();
 });
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeFilterMenus();
+});
+window.addEventListener("resize", () => {
+  for (const kind of ["model", "platform"]) positionFilterMenu(kind);
+});
+window.addEventListener(
+  "scroll",
+  () => {
+    for (const kind of ["model", "platform"]) positionFilterMenu(kind);
+  },
+  true,
+);
 byId("close-detail").addEventListener("click", () =>
   byId("task-dialog").close(),
 );

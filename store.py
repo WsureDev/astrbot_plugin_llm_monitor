@@ -355,7 +355,9 @@ class EventStore:
         if kind == "task_update":
             cursor = db.execute(
                 """UPDATE tasks SET conversation_id=COALESCE(NULLIF(?,''),conversation_id),
-                provider_id=?,provider_model=?,started_at=COALESCE(started_at,?),queued_at=? WHERE task_id=?""",
+                provider_id=COALESCE(NULLIF(?,''),provider_id),
+                provider_model=COALESCE(NULLIF(?,''),provider_model),
+                started_at=COALESCE(started_at,?),queued_at=COALESCE(?,queued_at) WHERE task_id=?""",
                 (
                     p.get("conversation_id", ""),
                     p.get("provider_id", ""),

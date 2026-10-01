@@ -142,7 +142,15 @@ class LLMMonitorPlugin(Star):
         identity = event.get_extra(CALLER_EXTRA)
         if not isinstance(identity, dict):
             identity = {}
-        state = dict(task_id=uuid.uuid4().hex, created_at=time.time(), llm_seq=0, tool_seq=0)
+        state = dict(
+            task_id=uuid.uuid4().hex,
+            created_at=time.time(),
+            llm_seq=0,
+            tool_seq=0,
+            model_known=False,
+            provider_id="",
+            provider_model="",
+        )
         record = dict(
             task_id=state["task_id"],
             created_at=state["created_at"],
@@ -153,7 +161,7 @@ class LLMMonitorPlugin(Star):
             sender_id=identity.get("sender_id") or event.get_sender_id(),
             sender_name=identity.get("sender_name") or event.get_sender_name(),
             group_id=identity.get("group_id") or event.get_group_id(),
-            **self._continuation_metadata(event),
+            **self._task_metadata(event),
         )
         if not self._enqueue("task_start", record):
             return None
@@ -161,6 +169,17 @@ class LLMMonitorPlugin(Star):
         event.set_extra(TASK_STATE_EXTRA, state)
         self._ensure_reconcile_task()
         return state
+
+    def _task_metadata(self, event):
+        metadata = self._continuation_metadata(event)
+        if metadata:
+            return metadata
+        event_type = type(event)
+        if event_type.__name__ == "CronMessageEvent" or event_type.__module__.endswith(
+            ".cron.events"
+        ):
+            return {"trigger": "cron"}
+        return {}
 
     def _continuation_metadata(self, event):
         scope = event.get_extra(CONTINUATION_EXTRA)
@@ -171,6 +190,39 @@ class LLMMonitorPlugin(Star):
             trigger="image_result",
             external_task_id=scope["task_id"],
         )
+
+    def _record_task_model(
+        self,
+        event,
+        provider_id,
+        provider_model,
+        *,
+        conversation_id="",
+        started_at=None,
+        queued_at=None,
+    ):
+        state = event.get_extra(TASK_STATE_EXTRA)
+        provider_model = str(provider_model or "")
+        if not isinstance(state, dict) or state.get("ended") or not provider_model:
+            return False
+        if state.get("model_known"):
+            return False
+        payload = dict(
+            task_id=state["task_id"],
+            started_at=started_at or time.time(),
+            queued_at=queued_at,
+            conversation_id=str(conversation_id or ""),
+            provider_id=str(provider_id or ""),
+            provider_model=provider_model,
+        )
+        if not self._enqueue("task_update", payload):
+            return False
+        state.update(
+            model_known=True,
+            provider_id=payload["provider_id"],
+            provider_model=provider_model,
+        )
+        return True
 
     @filter.on_plugin_loaded()
     async def on_plugin_loaded(self, metadata):
@@ -223,7 +275,7 @@ class LLMMonitorPlugin(Star):
         fallback = not include_model
         retry = self.probe.retry.llm_metadata(runner)
         messages = field(field(runner, "run_context"), "messages", [])
-        return self._start_span(
+        span = self._start_span(
             "llm",
             event,
             provider_id=provider_id,
@@ -233,6 +285,16 @@ class LLMMonitorPlugin(Star):
             input_text=dict(model=model, messages=list(messages or [])),
             **retry,
         )
+        # Agent/Cron runners can bypass on_llm_request. The first actual
+        # runner call is still authoritative for the task's displayed model.
+        self._record_task_model(
+            event,
+            provider_id,
+            model,
+            started_at=span.get("started_at") if span else None,
+            queued_at=event.get_extra(QUEUED_EXTRA),
+        )
+        return span
 
     def start_attempt(self, call, layer, metadata, *, parent_id=None, operation=""):
         if not call.get("active") or not self.store.accepting or not self._cfg("enabled", True):
@@ -325,16 +387,13 @@ class LLMMonitorPlugin(Star):
             if state is None:
                 return
             provider = await self.context.get_using_provider_async(event.unified_msg_origin)
-            self._enqueue(
-                "task_update",
-                dict(
-                    task_id=state["task_id"],
-                    started_at=time.time(),
-                    queued_at=event.get_extra(QUEUED_EXTRA),
-                    conversation_id=str(field(field(req, "conversation"), "cid", "") or ""),
-                    provider_id=str(field(field(provider, "provider_config", {}), "id", "") or ""),
-                    provider_model=str(field(req, "model") or provider.get_model() or ""),
-                ),
+            self._record_task_model(
+                event,
+                str(field(field(provider, "provider_config", {}), "id", "") or ""),
+                str(field(req, "model") or provider.get_model() or ""),
+                started_at=time.time(),
+                queued_at=event.get_extra(QUEUED_EXTRA),
+                conversation_id=str(field(field(req, "conversation"), "cid", "") or ""),
             )
         except Exception as exc:
             self.record_failure(exc)

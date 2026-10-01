@@ -423,7 +423,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.outputs[0].raw_completion = {"model": "resolved"}
         result = [item async for item in self.runner._iter_llm_responses(include_model=False)]
         self.assertIs(result[0], self.outputs[0])
-        call = (await self.record())["llm_calls"][0]
+        record = await self.record()
+        call = record["llm_calls"][0]
+        self.assertEqual(record["task"]["provider_model"], "fallback-model")
         self.assertEqual(
             (call["provider_model"], call["response_model"], call["is_fallback"]),
             ("fallback-model", "resolved", 1),
@@ -467,6 +469,16 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             ),
             ("user-1", "User", "test"),
         )
+
+    async def test_cron_event_is_tagged_as_async_task(self):
+        class CronMessageEvent(Event):
+            pass
+
+        cron = CronMessageEvent()
+        await self.plugin.on_agent_begin(cron, None)
+        await self.plugin.store.flush()
+        record = await self.plugin.store.get_task(cron.get_extra(main.TASK_EXTRA))
+        self.assertEqual(record["task"]["trigger"], "cron")
 
     async def test_stream_error_and_first_content_chunk(self):
         self.outputs = [
