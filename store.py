@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import sqlite3
 import threading
 import time
@@ -11,9 +10,9 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
 
-from .serialization import redact_text, safe_json
+from astrbot.api import logger
 
-logger = logging.getLogger("astrbot_plugin_llm_monitor")
+from .serialization import redact_text, safe_json
 
 RETRY_COLUMNS = {
     "round_id": "TEXT",
@@ -101,7 +100,7 @@ class EventStore:
             self._stats["failed"] += count
             self._stats.update(last_error_at=now, last_error=message)
         if time.monotonic() - self._last_warning >= 30:
-            logger.warning("Monitor persistence degraded: %s", message)
+            logger.warning(f"Monitor persistence degraded: {message}")
             self._last_warning = time.monotonic()
 
     async def start(self):

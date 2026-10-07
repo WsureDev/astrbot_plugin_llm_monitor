@@ -1,7 +1,7 @@
 name: astrbot_plugin_llm_monitor
 display_name: LLM 负载监控
 desc: 记录 AstrBot 的 LLM 请求、模型负载、耗时、用量与 Agent 工具调用，并提供 WebUI 页面。
-version: v0.4.0
+version: v0.4.1
 author: wsure
 astrbot_version: ">=4.28.0"
 support_platforms:

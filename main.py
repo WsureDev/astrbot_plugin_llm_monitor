@@ -23,7 +23,7 @@ from .serialization import redact_text
 from .store import EventStore
 
 PLUGIN_NAME = "astrbot_plugin_llm_monitor"
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 TASK_EXTRA = f"{PLUGIN_NAME}.task_id"
 TASK_STATE_EXTRA = f"{PLUGIN_NAME}.task_state"
 QUEUED_EXTRA = f"{PLUGIN_NAME}.queued_at"

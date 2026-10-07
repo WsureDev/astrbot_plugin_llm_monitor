@@ -2,9 +2,11 @@
 
 记录 Agent 任务、每次逻辑 LLM 请求、模型、耗时、Token 用量和工具执行，并在插件的 monitor 页面查看。
 
-v0.4.0 的实现与测试以 **AstrBot v4.28.0 源码**为依据。运行时探针检查目标方法的签名及 async generator / classmethod 形态；不兼容时停止安装对应探针，在页面自检中显示原因。其他 AstrBot 版本仍需验证。
+v0.4.1 的实现与测试以 **AstrBot v4.28.0 源码**为依据。运行时探针检查目标方法的签名及 async generator / classmethod 形态；不兼容时停止安装对应探针，在页面自检中显示原因。其他 AstrBot 版本仍需验证。
 
 ## 使用与升级
+
+v0.4.1 修正日志规范：持久化模块统一使用 `astrbot.api.logger` 输出告警，保留错误脱敏与 30 秒限频。
 
 1. 在 AstrBot 安装或更新本插件，保存配置并按 WebUI 提示重载。
 2. 在插件详情页打开 monitor 页面。页面 API 复用 AstrBot 的登录鉴权和 Plugin Page Bridge；资源由宿主处理认证参数和主题。
