@@ -13,6 +13,8 @@ import time
 
 from .payloads import ResponseCapture
 from .retry_probe import CALL, RetryProbe, scoped_iterator
+from .run_scope import RUN_SCOPE
+from .wrapping import active_monitor_wrapper, contains_wrapper
 
 
 def field(value, key, default=None):
@@ -23,19 +25,39 @@ def event_from(context):
     return field(field(context, "context"), "event")
 
 
+async def passthrough(iterator):
+    try:
+        async for item in iterator:
+            yield item
+    finally:
+        await iterator.aclose()
+
+
 class RunnerProbe:
     def __init__(self, plugin):
         self.plugin = plugin
         self.retry = RetryProbe(plugin)
         self._patches = []
+        self.active = False
+        self._generation = None
         self.status = dict(enabled=False, reason="not initialized", tested_version="4.28.0")
 
     def _record(self, method, *args, **kwargs):
+        if not self.active:
+            return None
         try:
             return getattr(self.plugin, method)(*args, **kwargs)
         except Exception as exc:
             self.plugin.record_failure(exc)
             return None
+
+    def _record_scoped(self, scoped, method, *args, **kwargs):
+        token = RUN_SCOPE.set(scoped) if scoped is not None else None
+        try:
+            return self._record(method, *args, **kwargs)
+        finally:
+            if token is not None:
+                RUN_SCOPE.reset(token)
 
     def install(self, runner_class=None, executor_class=None):
         if self._patches:
@@ -65,13 +87,19 @@ class RunnerProbe:
                     raise TypeError("probe target is not an async generator")
                 if not required.issubset(inspect.signature(method).parameters):
                     raise TypeError("probe target signature changed")
-                if getattr(method, "_astrbot_llm_monitor_wrapper", False):
+                if active_monitor_wrapper(method):
                     raise RuntimeError(
                         "another monitor instance owns a probe; reload that instance first"
                     )
+            generation = object()
+            self._generation = generation
 
             @functools.wraps(llm)
             async def wrapped_llm(runner, *, include_model=True):
+                if not self.active or self._generation is not generation:
+                    async for item in passthrough(llm(runner, include_model=include_model)):
+                        yield item
+                    return
                 span = self._record("start_llm", runner, include_model)
                 call = self.retry.guard(lambda: self.retry.begin_call(runner, span))
                 iterator = scoped_iterator(llm(runner, include_model=include_model), CALL, call)
@@ -148,6 +176,10 @@ class RunnerProbe:
 
             @functools.wraps(execute)
             async def wrapped_execute(cls, tool, run_context, **tool_args):
+                if not self.active or self._generation is not generation:
+                    async for item in passthrough(execute(cls, tool, run_context, **tool_args)):
+                        yield item
+                    return
                 span = self._record("start_tool", tool, run_context, tool_args)
                 iterator = execute(cls, tool, run_context, **tool_args)
                 status, error, last_output, saw_output, is_error = (
@@ -183,44 +215,62 @@ class RunnerProbe:
 
             @functools.wraps(step)
             async def wrapped_step(runner):
+                if not self.active or self._generation is not generation:
+                    async for item in passthrough(step(runner)):
+                        yield item
+                    return
                 event = event_from(field(runner, "run_context"))
+                binder = getattr(self.plugin, "bind_runner", None)
+                scoped = self._record("bind_runner", runner) if callable(binder) else None
                 iterator = step(runner)
+                if scoped is not None:
+                    iterator = scoped_iterator(iterator, RUN_SCOPE, scoped)
                 exhausted = False
                 try:
                     async for response in iterator:
                         kind = field(response, "type")
                         if kind in {"err", "aborted"}:
-                            self._record("end_task", event, "error" if kind == "err" else "aborted")
+                            self._record_scoped(
+                                scoped, "end_task", event, "error" if kind == "err" else "aborted"
+                            )
                         yield response
                     exhausted = True
                 except asyncio.CancelledError:
-                    self._record("end_task", event, "cancelled")
+                    self._record_scoped(scoped, "end_task", event, "cancelled")
                     raise
                 except Exception as exc:
-                    self._record("end_task", event, "error", f"{type(exc).__name__}: {exc}")
+                    self._record_scoped(
+                        scoped, "end_task", event, "error", f"{type(exc).__name__}: {exc}"
+                    )
                     raise
                 finally:
                     try:
                         await iterator.aclose()
                     finally:
-                        if not exhausted:
-                            done = bool(getattr(runner, "done", lambda: False)())
+                        done = bool(getattr(runner, "done", lambda: False)())
+                        if done or not exhausted:
                             if done:
                                 final = getattr(runner, "get_final_llm_resp", lambda: None)()
                                 final_status = (
                                     "error" if field(final, "role") == "err" else "completed"
                                 )
-                                self._record("end_task", event, final_status)
+                                self._record_scoped(scoped, "end_task", event, final_status)
                             else:
-                                self._record("end_task", event, "interrupted")
+                                self._record_scoped(scoped, "end_task", event, "interrupted")
+                        releaser = getattr(self.plugin, "release_runner", None)
+                        if scoped is not None and (done or not exhausted) and callable(releaser):
+                            self._record("release_runner", scoped)
 
             for wrapper in (wrapped_llm, wrapped_step, wrapped_execute):
                 wrapper._astrbot_llm_monitor_wrapper = True
+                wrapper._astrbot_llm_monitor_owner = self
+                wrapper._astrbot_monitor_generation = generation
             replacements = [
                 (runner_class, "_iter_llm_responses", llm, wrapped_llm),
                 (runner_class, "step", step, wrapped_step),
                 (executor_class, "execute", descriptor, classmethod(wrapped_execute)),
             ]
+            self.active = True
             for target, name, original, wrapper in replacements:
                 setattr(target, name, wrapper)
                 self._patches.append((target, name, original, wrapper))
@@ -234,6 +284,7 @@ class RunnerProbe:
             return False
 
     def restore(self):
+        self.active = False
         self.retry.restore()
         for target, name, original, wrapper in reversed(self._patches):
             if inspect.getattr_static(target, name) is wrapper:
@@ -244,7 +295,7 @@ class RunnerProbe:
     def snapshot(self):
         status = dict(self.status)
         if self._patches and any(
-            inspect.getattr_static(target, name, None) is not wrapper
+            not contains_wrapper(inspect.getattr_static(target, name, None), wrapper)
             for target, name, _, wrapper in self._patches
         ):
             status.update(enabled=False, reason="A probe target was replaced after installation")

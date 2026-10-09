@@ -11,6 +11,8 @@ import functools
 import inspect
 from contextvars import ContextVar
 
+from .wrapping import contains_wrapper
+
 ORIGIN = ContextVar("llm_monitor_continuation", default=None)
 IDENTITY_EXTRA = "astrbot_plugin_llm_monitor.caller_identity"
 CONTINUATION_EXTRA = "astrbot_plugin_llm_monitor.continuation"
@@ -157,7 +159,7 @@ class ContinuationProbe:
 
     def snapshot(self):
         owned = bool(self.patches) and all(
-            inspect.getattr_static(t, n) is w for t, n, _, w in self.patches
+            contains_wrapper(inspect.getattr_static(t, n), w) for t, n, _, w in self.patches
         )
         return dict(installed=owned, reason=self.reason, active=len(self.active))
 

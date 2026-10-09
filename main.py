@@ -19,11 +19,12 @@ from astrbot.api.web import json_response, request
 from .continuation import CONTINUATION_EXTRA, IDENTITY_EXTRA, ContinuationProbe
 from .probe import RunnerProbe, event_from, field
 from .reply_filter import strip_thinking
+from .run_scope import RUN_SCOPE
 from .serialization import redact_text
 from .store import EventStore
 
 PLUGIN_NAME = "astrbot_plugin_llm_monitor"
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 TASK_EXTRA = f"{PLUGIN_NAME}.task_id"
 TASK_STATE_EXTRA = f"{PLUGIN_NAME}.task_state"
 QUEUED_EXTRA = f"{PLUGIN_NAME}.queued_at"
@@ -60,6 +61,7 @@ class LLMMonitorPlugin(Star):
         self._last_record_error = ""
         self._last_warning = 0.0
         self._recovery_error = ""
+        self._runner_scopes = {}
         self.continuations = ContinuationProbe(self)
         for route, handler in (
             ("health", self.health),
@@ -111,6 +113,9 @@ class LLMMonitorPlugin(Star):
             self._reconcile_task = None
         self.continuations.restore()
         self.probe.restore()
+        for scoped in self._runner_scopes.values():
+            scoped["live"] = False
+        self._runner_scopes.clear()
         # AstrBot 4.28 keeps registered handlers in a shared list; remove only ours.
         routes = getattr(self.context, "registered_web_apis", None)
         if isinstance(routes, list):
@@ -136,9 +141,21 @@ class LLMMonitorPlugin(Star):
     def _ensure_task(self, event, *, new_cycle=False):
         if not self.capture_enabled(event):
             return None
+        scoped = RUN_SCOPE.get()
+        if scoped and scoped["plugin"] is self and scoped["event"] is event:
+            state = scoped["state"]
+            return None if state.get("ended") else state
         state = event.get_extra(TASK_STATE_EXTRA)
         if isinstance(state, dict) and not (new_cycle and state.get("ended")):
             return None if state.get("ended") else state
+        state = self._new_task_state(event)
+        if state is None:
+            return None
+        event.set_extra(TASK_EXTRA, state["task_id"])
+        event.set_extra(TASK_STATE_EXTRA, state)
+        return state
+
+    def _new_task_state(self, event, *, parent_task_id=None, trigger=None):
         identity = event.get_extra(CALLER_EXTRA)
         if not isinstance(identity, dict):
             identity = {}
@@ -163,12 +180,50 @@ class LLMMonitorPlugin(Star):
             group_id=identity.get("group_id") or event.get_group_id(),
             **self._task_metadata(event),
         )
+        if parent_task_id:
+            record["parent_task_id"] = parent_task_id
+        if trigger:
+            record["trigger"] = trigger
         if not self._enqueue("task_start", record):
             return None
-        event.set_extra(TASK_EXTRA, state["task_id"])
-        event.set_extra(TASK_STATE_EXTRA, state)
         self._ensure_reconcile_task()
         return state
+
+    def bind_runner(self, runner):
+        context = field(runner, "run_context")
+        event = event_from(context)
+        if not self.capture_enabled(event):
+            return None
+        existing = self._runner_scopes.get(id(context))
+        if existing and existing["run_context"] is context:
+            return existing
+        root = event.get_extra(TASK_STATE_EXTRA)
+        if not isinstance(root, dict):
+            token = RUN_SCOPE.set(None)
+            try:
+                root = self._ensure_task(event)
+            finally:
+                RUN_SCOPE.reset(token)
+        if root is None:
+            return None
+        if not root.get("ended") and root.get("runner_context") in (None, id(context)):
+            state = root
+            root["runner_context"] = id(context)
+        else:
+            state = self._new_task_state(event, parent_task_id=root["task_id"], trigger="subagent")
+        if state is None:
+            return None
+        scoped = dict(plugin=self, event=event, run_context=context, state=state, live=True)
+        self._runner_scopes[id(context)] = scoped
+        return scoped
+
+    def release_runner(self, scoped):
+        if scoped is None:
+            return
+        scoped["live"] = False
+        key = id(scoped["run_context"])
+        if self._runner_scopes.get(key) is scoped:
+            self._runner_scopes.pop(key, None)
 
     def _task_metadata(self, event):
         metadata = self._continuation_metadata(event)
@@ -201,7 +256,7 @@ class LLMMonitorPlugin(Star):
         started_at=None,
         queued_at=None,
     ):
-        state = event.get_extra(TASK_STATE_EXTRA)
+        state = self._ensure_task(event)
         provider_model = str(provider_model or "")
         if not isinstance(state, dict) or state.get("ended") or not provider_model:
             return False
@@ -355,7 +410,12 @@ class LLMMonitorPlugin(Star):
         continuation = event.get_extra(CONTINUATION_EXTRA)
         if continuation and status == "interrupted":
             return  # The delivery owner, not a deliberately closed runner, ends this task.
-        state = event.get_extra(TASK_STATE_EXTRA)
+        scoped = RUN_SCOPE.get()
+        state = (
+            scoped["state"]
+            if scoped and scoped["plugin"] is self and scoped["event"] is event
+            else event.get_extra(TASK_STATE_EXTRA)
+        )
         if not isinstance(state, dict) or state.get("ended"):
             return
         if self._enqueue(
@@ -436,6 +496,11 @@ class LLMMonitorPlugin(Star):
         return None
 
     def _task_is_live(self, task, snapshot):
+        if any(
+            scoped["live"] and scoped["state"].get("task_id") == task["task_id"]
+            for scoped in self._runner_scopes.values()
+        ):
+            return True
         if any(
             scope["active"]
             and any(event.get_extra(TASK_EXTRA) == task["task_id"] for event in scope["events"])

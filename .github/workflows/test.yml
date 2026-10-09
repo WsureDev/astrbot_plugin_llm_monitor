@@ -19,8 +19,8 @@ jobs:
         with:
           python-version: "${{ matrix.python-version }}"
       - run: pip install -r requirements-dev.txt
-      - run: ruff check main.py probe.py retry_probe.py store.py serialization.py reply_filter.py tests
-      - run: ruff format --check main.py probe.py retry_probe.py store.py serialization.py reply_filter.py tests
+      - run: ruff check main.py probe.py retry_probe.py run_scope.py wrapping.py continuation.py store.py serialization.py reply_filter.py tests
+      - run: ruff format --check main.py probe.py retry_probe.py run_scope.py wrapping.py continuation.py store.py serialization.py reply_filter.py tests
       - run: python -m unittest discover -s tests -v
         env:
           ASTRBOT_SOURCE_PATH: .test-astrbot

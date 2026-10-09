@@ -801,7 +801,6 @@ tr:hover {
   }
 }
 
-
 /* Refined filter controls. */
 .toolbar > label {
   min-width: 180px;
@@ -822,7 +821,9 @@ tr:hover {
     calc(100% - 17px) 50%,
     calc(100% - 12px) 50%;
   background-repeat: no-repeat;
-  background-size: 5px 5px, 5px 5px;
+  background-size:
+    5px 5px,
+    5px 5px;
   border: 1px solid var(--line);
   border-radius: 12px;
   transition:

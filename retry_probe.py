@@ -15,6 +15,8 @@ import time
 import uuid
 from contextvars import ContextVar
 
+from .wrapping import active_owned_wrapper, contains_wrapper
+
 ROUND = ContextVar("llm_monitor_round", default=None)
 CALL = ContextVar("llm_monitor_call", default=None)
 PROVIDER = ContextVar("llm_monitor_provider", default=None)
@@ -184,6 +186,8 @@ class RetryProbe:
     def __init__(self, plugin):
         self.plugin = plugin
         self._patches = []
+        self.active = False
+        self._generation = None
         self._provider_classes = set()
         self.status = dict(framework=False, request=False, http=False, reason="not initialized")
 
@@ -195,20 +199,56 @@ class RetryProbe:
             return None
 
     def record(self, method, *args, **kwargs):
+        if not self.active:
+            return None
         return self.guard(lambda: getattr(self.plugin, method)(*args, **kwargs))
 
     def _patch(self, target, name, wrapper):
         original = inspect.getattr_static(target, name)
-        if getattr(original, "_astrbot_retry_monitor_wrapper", False):
+        if active_owned_wrapper(
+            original, "_astrbot_retry_monitor_wrapper", "_astrbot_retry_monitor_owner", "RetryProbe"
+        ):
             raise RuntimeError(f"Another retry monitor owns {name}")
+        generation = self._generation
+
+        def delegate():
+            return wrapper if self.active and self._generation is generation else original
+
+        if inspect.isasyncgenfunction(wrapper):
+
+            @functools.wraps(wrapper)
+            async def guarded(*args, **kwargs):
+                iterator = delegate()(*args, **kwargs)
+                try:
+                    async for item in iterator:
+                        yield item
+                finally:
+                    await iterator.aclose()
+
+        elif inspect.iscoroutinefunction(wrapper):
+
+            @functools.wraps(wrapper)
+            async def guarded(*args, **kwargs):
+                return await delegate()(*args, **kwargs)
+
+        else:
+
+            @functools.wraps(wrapper)
+            def guarded(*args, **kwargs):
+                return delegate()(*args, **kwargs)
+
         local = name in vars(target)
-        wrapper._astrbot_retry_monitor_wrapper = True
-        setattr(target, name, wrapper)
-        self._patches.append((target, name, original, wrapper, local))
+        guarded._astrbot_retry_monitor_wrapper = True
+        guarded._astrbot_retry_monitor_owner = self
+        guarded._astrbot_monitor_generation = generation
+        setattr(target, name, guarded)
+        self._patches.append((target, name, original, guarded, local))
 
     def install(self, runner_class, runner_module=None, request_module=None, http_class=None):
         if self._patches:
             return True
+        self._generation = object()
+        self.active = True
         try:
             if runner_module is None:
                 from astrbot.core.agent.runners import tool_loop_agent_runner as runner_module
@@ -359,7 +399,12 @@ class RetryProbe:
         # Both sync-response and streaming adapters use these boundaries in 4.28.
         for name in ("_query", "_query_stream"):
             original = getattr(cls, name, None)
-            if original is None or getattr(original, "_astrbot_retry_monitor_wrapper", False):
+            if original is None or active_owned_wrapper(
+                original,
+                "_astrbot_retry_monitor_wrapper",
+                "_astrbot_retry_monitor_owner",
+                "RetryProbe",
+            ):
                 continue
             if inspect.iscoroutinefunction(original):
                 wrapper = self._wrap_query(original)
@@ -474,7 +519,7 @@ class RetryProbe:
     def snapshot(self):
         status = dict(self.status)
         owned = all(
-            inspect.getattr_static(target, name, None) is wrapper
+            contains_wrapper(inspect.getattr_static(target, name, None), wrapper)
             for target, name, _, wrapper, _ in self._patches
         )
         status["ok"] = bool(
@@ -486,6 +531,7 @@ class RetryProbe:
         return status
 
     def restore(self):
+        self.active = False
         for target, name, original, wrapper, local in reversed(self._patches):
             if inspect.getattr_static(target, name, None) is wrapper:
                 if local:

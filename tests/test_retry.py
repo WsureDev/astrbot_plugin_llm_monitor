@@ -2,6 +2,7 @@
 
 import ast
 import asyncio
+import functools
 import logging
 import os
 import tempfile
@@ -508,6 +509,44 @@ class RetryTests(unittest.IsolatedAsyncioTestCase):
             self.plugin.probe.restore()
             self.assertIs(httpx.AsyncClient.send, foreign)
             self.assertFalse(getattr(self.Provider._query, "_astrbot_retry_monitor_wrapper", False))
+        finally:
+            httpx.AsyncClient.send = original
+
+    async def test_reload_keeps_cooperative_http_wrapper_without_duplicate_attempts(self):
+        await self.run_round()
+        retry = self.plugin.probe.retry
+        owned = httpx.AsyncClient.send
+        original = next(row[2] for row in retry._patches if row[0] is httpx.AsyncClient)
+
+        @functools.wraps(owned)
+        async def foreign(*args, **kwargs):
+            return await owned(*args, **kwargs)
+
+        httpx.AsyncClient.send = foreign
+        try:
+            self.assertTrue(retry.snapshot()["ok"])
+            retry.restore()
+            self.assertIs(httpx.AsyncClient.send, foreign)
+            self.assertTrue(
+                retry.install(self.Runner, self.module, self.request_module, httpx.AsyncClient)
+            )
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(lambda req: httpx.Response(200))
+            ) as client:
+
+                async def operation():
+                    await client.get("https://fake.test/")
+                    return Response()
+
+                self.runner.provider.outcomes = [operation]
+                await self.run_round()
+            record = await self.data()
+            self.assertEqual(len(record["llm_calls"]), 2)
+            layers = [attempt["layer"] for attempt in record["retry_attempts"]]
+            self.assertEqual(layers.count("provider"), 2)
+            self.assertEqual(layers.count("request"), 2)
+            self.assertEqual(layers.count("http"), 1)
+            self.assertTrue(retry.snapshot()["ok"])
         finally:
             httpx.AsyncClient.send = original
 
