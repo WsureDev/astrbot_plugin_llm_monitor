@@ -11,6 +11,7 @@ import functools
 import inspect
 import time
 
+from .input_probe import ProviderInputProbe
 from .payloads import ResponseCapture
 from .retry_probe import CALL, RetryProbe, scoped_iterator
 from .run_scope import RUN_SCOPE
@@ -37,6 +38,7 @@ class RunnerProbe:
     def __init__(self, plugin):
         self.plugin = plugin
         self.retry = RetryProbe(plugin)
+        self.inputs = ProviderInputProbe(self)
         self._patches = []
         self.active = False
         self._generation = None
@@ -102,10 +104,12 @@ class RunnerProbe:
                     return
                 span = self._record("start_llm", runner, include_model)
                 call = self.retry.guard(lambda: self.retry.begin_call(runner, span))
+                if call is not None:
+                    self.retry.guard(lambda: self.inputs.ensure_provider(type(call["provider"])))
                 iterator = scoped_iterator(llm(runner, include_model=include_model), CALL, call)
                 status, error, ttft, usage, response_model = "interrupted", "", None, {}, ""
                 capture = ResponseCapture(
-                    getattr(getattr(self.plugin, "store", None), "max_text_chars", 20000)
+                    redact=getattr(getattr(self.plugin, "store", None), "redact_secrets", True)
                 )
                 try:
                     async for response in iterator:
@@ -285,6 +289,7 @@ class RunnerProbe:
 
     def restore(self):
         self.active = False
+        self.inputs.restore()
         self.retry.restore()
         for target, name, original, wrapper in reversed(self._patches):
             if inspect.getattr_static(target, name) is wrapper:
@@ -294,6 +299,7 @@ class RunnerProbe:
 
     def snapshot(self):
         status = dict(self.status)
+        status["provider_input_intact"] = self.inputs.intact()
         if self._patches and any(
             not contains_wrapper(inspect.getattr_static(target, name, None), wrapper)
             for target, name, _, wrapper in self._patches

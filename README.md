@@ -2,11 +2,13 @@
 
 记录 Agent 任务、每次逻辑 LLM 请求、模型、耗时、Token 用量和工具执行，并在插件的 monitor 页面查看。
 
-v0.4.2 的实现与测试以 **AstrBot v4.28.0 源码**为依据。运行时探针检查目标方法的签名及 async generator / classmethod 形态；不兼容时停止安装对应探针，在页面自检中显示原因。其他 AstrBot 版本仍需验证。
+v0.4.3 的实现与测试以 **AstrBot v4.28.0 源码**为依据。运行时探针检查目标方法的签名及 async generator / classmethod 形态；不兼容时停止安装对应探针，在页面自检中显示原因。其他 AstrBot 版本仍需验证。
 
 ## 使用与升级
 
-v0.4.2 修复探针与图片管理插件的包装兼容，并独立记录后台子代理。持久化告警沿用 v0.4.1 的 AstrBot 日志规范、错误脱敏与 30 秒限频。
+v0.4.3 全量保存采集到的输入、输出、流式文本和错误，移除字符数、集合条数、键名长度、遍历预算及人为嵌套深度裁剪；大字段保留，二进制以完整 Base64 记录。保留凭据脱敏和循环引用标记。旧的 max_text_chars 配置不再读取，无需修改旧配置才能生效；升级前已截断或省略的内容无法恢复。
+
+新增 Provider 调用边界的上下文、工具定义和额外参数快照，避免异步写入前原对象变化。v0.4.2 的包装兼容及后台子代理独立任务记录继续保留。
 
 1. 在 AstrBot 安装或更新本插件，保存配置并按 WebUI 提示重载。
 2. 在插件详情页打开 monitor 页面。页面 API 复用 AstrBot 的登录鉴权和 Plugin Page Bridge；资源由宿主处理认证参数和主题。
@@ -22,7 +24,6 @@ v0.4.2 修复探针与图片管理插件的包装兼容，并独立记录后台�
 | --- | --- | --- |
 | monitor.enabled | true | 控制任务、LLM、工具及各层重试的新记录采集。关闭后仍可查询历史记录；已采集的在途调用会写入结束事件。 |
 | monitor.strip_thinking_blocks | true | 独立控制非流式回复中的完整 thinking / think 块过滤。 |
-| monitor.max_text_chars | 20000 | 每条工具输入、输出与错误文本的保存长度上限，限制在 1000–100000；0 使用默认值。截断标记可能额外占用少量字符。 |
 | monitor.retention_days | 30 | 保留 1–365 天；启动及运行期间每小时清理。运行中任务及其子记录暂不删除。 |
 | monitor.redact_secrets | true | 对常见凭据字段、Bearer 文本及 MCP 文本内的嵌套 JSON 脱敏。 |
 
@@ -74,7 +75,11 @@ on_decorating_result 在 AstrBot 的非流式分段回复之前，删除同一�
 
 AstrBot 生图插件会先提交后台任务，再用新的 CronMessageEvent 唤醒 Agent 发送结果。插件通过生图插件的 `wake_ai_for_generation_task_result(source_event, task_id)` 绑定原始事件和精确的统一消息来源，复用原始平台、用户和群组；不会用同一会话里最近一条消息猜测调用者。对成功发送的图片，任务显示已完成；Agent 为了停止继续生成而提前关闭 step 生成器不会再覆盖为中断。自检中的「生图续接」显示该观测点是否已安装；未安装生图插件时不影响普通监控。
 
-详情按开始时间平铺展示 LLM 调用、各层 Retry 和工具调用，不再把三层重试嵌套在 LLM 下。LLM 展开显示来自 AstrBot runner 的上下文输入和最终响应；工具展开显示执行器输入和最后输出；Retry 展示层级、序号、原因、状态和等待时间。输入输出遵循 max_text_chars 和脱敏配置，无法由 AstrBot 对象提供的字段显示为「未采集」，避免伪造内容。
+详情按开始时间平铺展示 LLM 调用、各层 Retry 和工具调用，不再把三层重试嵌套在 LLM 下。LLM 展开显示上下文输入和完整最终响应对象；工具展开显示执行器输入和最后输出；Retry 展示层级、序号、原因、状态和等待时间。输入输出全量保存并遵循脱敏配置，无法由 AstrBot 对象提供的字段显示为「未采集」，避免伪造内容。
+
+LLM 输入的 capture_source=provider_call 表示已采集 runner 实际调用 text_chat/text_chat_stream 时的 messages、tools 和 parameters（包含额外用户内容，排除运行时 abort_signal）。tools 使用该次 func_tool 的官方 openai_schema()，tool_schema_format=openai；它是统一展示格式，Provider 后续可能转换为其他厂商格式，不表示 HTTP 原始报文。model 是有效模型，parameters.model 在调用显式传入时保留原 override。capture_source=runner 表示只有初始 runner 上下文，未采集到 Provider 边界，不能据此认定请求没有工具。
+
+正常完成时保存完整最终响应；只有分片而无最终响应时，保存完整正文、reasoning、原始分片字段并标记 partial=true。序列化失败计入采集或持久化错误，不用截断标记或通用占位伪装完整记录。循环引用标记只替代无法在 JSON 中表示的回边。数据保留天数仍独立生效。
 
 列表整行可点击或用键盘 Enter/Space 打开详情，按钮有 hover/active/focus 反馈。模型和渠道筛选从保留数据动态生成，可多选；选项请求独立于任务列表，切换时间范围后自动刷新。
 
@@ -85,7 +90,7 @@ AstrBot 生图插件会先提交后台任务，再用新的 CronMessageEvent 唤
 - 队列满、写入失败和采集异常会进入健康诊断，不再静默吞掉。损失计数在本次插件运行期间持续保留；后续成功写入不会掩盖已丢失的数据。日志限频，避免监控异常刷屏。
 - 页面每次刷新读取真实 health；刷新失败保留最后一次成功数据并提示过期。详情随轮询刷新，保留展开状态；请求序号阻止旧响应覆盖新筛选或新选择。
 - 任务支持分页；手机端详情全屏显示，桌面端使用对话框。按钮、筛选输入与弹窗支持键盘操作及 Escape 关闭。
-- 脱敏是有边界的尽力处理，不能识别所有自由文本秘密；截断后的工具内容可能不再是完整 JSON。不要将监控数据库视为已彻底去敏的数据集。
+- 脱敏是有边界的尽力处理，不能识别所有自由文本秘密。不要将监控数据库视为已彻底去敏的数据集。
 
 ## 开发验证
 
@@ -106,10 +111,12 @@ ASTRBOT_SOURCE_PATH=/path/to/AstrBot-4.28.0 python -m unittest discover -s tests
 
 Retry 测试执行 AstrBot 原始方法，覆盖正常多轮与空响应重试区分、fallback 中重试、请求层耗尽、适配器上下文恢复、真实 OpenAI SDK 自动重试、流式进入重试、流式中途失败、退避取消、跨任务生成器推进及并发隔离。
 
+全量采集回归测试覆盖超过百万字符的文本与工具说明、超过千项的列表与对象、长键名、64 层嵌套、二进制往返、嵌套 JSON 脱敏、流式中断后的工具参数分片，以及 Provider 调用前快照、并发隔离和包装链卸载重装。
+
 ~~~bash
 pip install -r requirements-dev.txt
-ruff check main.py probe.py retry_probe.py store.py serialization.py reply_filter.py tests
-ruff format --check main.py probe.py retry_probe.py store.py serialization.py reply_filter.py tests
+ruff check main.py probe.py input_probe.py payloads.py retry_probe.py run_scope.py wrapping.py continuation.py store.py serialization.py reply_filter.py tests
+ruff format --check main.py probe.py input_probe.py payloads.py retry_probe.py run_scope.py wrapping.py continuation.py store.py serialization.py reply_filter.py tests
 npm ci
 npx playwright install chromium
 npm run format:check

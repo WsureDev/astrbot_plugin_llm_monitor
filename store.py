@@ -34,14 +34,12 @@ class EventStore:
         self,
         path: Path,
         *,
-        max_text_chars=20000,
         retention_days=30,
         redact_secrets=True,
         queue_size=2000,
         cleanup_interval=3600,
     ):
         self.path = Path(path)
-        self.max_text_chars = max(1000, min(int(max_text_chars or 20000), 100000))
         self.retention_days = max(1, min(int(retention_days or 30), 365))
         self.redact_secrets = bool(redact_secrets)
         self.cleanup_interval = max(1, cleanup_interval)
@@ -94,7 +92,7 @@ class EventStore:
         return result
 
     def _failure(self, count: int, exc: Exception):
-        message = redact_text(f"{type(exc).__name__}: {exc}", 2000, self.redact_secrets)
+        message = redact_text(f"{type(exc).__name__}: {exc}", redact=self.redact_secrets)
         now = time.time()
         with self._lock:
             self._stats["failed"] += count
@@ -117,7 +115,7 @@ class EventStore:
                 self._writer_pool, self._initialize_sync
             )
         except Exception as exc:
-            self._init_error = redact_text(str(exc), 2000, self.redact_secrets)
+            self._init_error = redact_text(str(exc), redact=self.redact_secrets)
             self._failure(0, exc)
             await self.close()
             raise
@@ -345,7 +343,7 @@ class EventStore:
                 self._stats["last_success_at"] = time.time()
 
     def _apply_event(self, db, kind, p):
-        error = redact_text(str(p.get("error") or ""), self.max_text_chars, self.redact_secrets)
+        error = redact_text(str(p.get("error") or ""), redact=self.redact_secrets)
         if kind == "task_start":
             db.execute(
                 """INSERT OR IGNORE INTO tasks
@@ -388,9 +386,7 @@ class EventStore:
             recovered = kind == "task_recover"
             status = "recovered" if recovered else p["status"]
             finish = p["finished_at"]
-            reason = redact_text(
-                str(p.get("reason") or error), self.max_text_chars, self.redact_secrets
-            )
+            reason = redact_text(str(p.get("reason") or error), redact=self.redact_secrets)
             cursor = db.execute(
                 """UPDATE tasks SET finished_at=?,status=?,duration=MAX(0,?-COALESCE(started_at,created_at)),
                 error=?,end_inferred=? WHERE task_id=?"""
@@ -489,6 +485,9 @@ class EventStore:
                 f"UPDATE {table} SET next_retry_wait=?, next_retry_wait_actual=?, retry_wait_status=? WHERE id=?",
                 (p.get("planned"), p.get("actual"), p["status"], p["id"]),
             )
+        elif kind == "llm_input":
+            self._write_text_fields(db, "llm_calls", p)
+            return
         elif kind == "tool_start":
             db.execute(
                 """INSERT INTO tool_calls (id,task_id,sequence,started_at,status,tool_name,input_json)
@@ -500,7 +499,7 @@ class EventStore:
                     p["started_at"],
                     "running",
                     p["tool_name"],
-                    safe_json(p.get("input"), self.max_text_chars, self.redact_secrets),
+                    safe_json(p.get("input"), redact=self.redact_secrets),
                 ),
             )
             return
@@ -512,7 +511,7 @@ class EventStore:
                     p["finished_at"],
                     p["status"],
                     p["duration"],
-                    safe_json(p.get("output"), self.max_text_chars, self.redact_secrets),
+                    safe_json(p.get("output"), redact=self.redact_secrets),
                     error,
                     p["id"],
                 ),
@@ -526,7 +525,7 @@ class EventStore:
         fields = {key: payload[key] for key in RETRY_COLUMNS if key in payload}
         if "retry_reason" in fields:
             fields["retry_reason"] = redact_text(
-                str(fields["retry_reason"] or ""), self.max_text_chars, self.redact_secrets
+                str(fields["retry_reason"] or ""), redact=self.redact_secrets
             )
         if fields:
             columns = ",".join(key + "=?" for key in fields)
@@ -540,10 +539,10 @@ class EventStore:
             if key not in payload:
                 continue
             value = payload[key]
-            if key == "input_text" and not isinstance(value, str):
-                value = safe_json(value, self.max_text_chars, self.redact_secrets)
+            if not isinstance(value, str):
+                value = safe_json(value, redact=self.redact_secrets)
             else:
-                value = redact_text(str(value or ""), self.max_text_chars, self.redact_secrets)
+                value = redact_text(str(value or ""), redact=self.redact_secrets)
             fields[key] = value
         if fields:
             columns = ",".join(key + "=?" for key in fields)

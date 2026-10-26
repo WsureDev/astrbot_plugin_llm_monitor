@@ -1,14 +1,19 @@
-"""Bounded capture of input/output objects supplied by AstrBot."""
+"""Complete capture of response objects supplied by AstrBot."""
 
 from __future__ import annotations
 
+import json
+
+from .serialization import safe_json
+
 
 class ResponseCapture:
-    """Bound streaming memory and prefer the host's final response over chunks."""
+    """Accumulate all chunks and prefer the host's complete final response."""
 
-    def __init__(self, limit):
-        self.limit = limit
-        self.parts = {"completion_text": "", "reasoning_content": ""}
+    def __init__(self, *, redact=True):
+        self.redact = redact
+        self.parts = {"completion_text": [], "reasoning_content": []}
+        self.chunks = []
         self.final = None
 
     def feed(self, response):
@@ -18,24 +23,22 @@ class ResponseCapture:
             else lambda k, d=None: getattr(response, k, d)
         )
         if get("is_chunk", False):
+            self.chunks.append(json.loads(safe_json(response, redact=self.redact)))
             for key in self.parts:
                 text = get(key)
                 if isinstance(text, str):
-                    self.parts[key] += text[: max(0, self.limit - len(self.parts[key]))]
+                    self.parts[key].append(text)
         else:
-            self.final = {
-                key: get(key)
-                for key in (
-                    "role",
-                    "completion_text",
-                    "reasoning_content",
-                    "tools_call_name",
-                    "tools_call_args",
-                    "tools_call_ids",
-                    "result_chain",
-                )
-                if get(key) is not None
-            }
+            self.final = json.loads(safe_json(response, redact=self.redact))
+            self.chunks.clear()
+            for parts in self.parts.values():
+                parts.clear()
 
     def result(self):
-        return self.final if self.final is not None else dict(self.parts, partial=True)
+        if self.final is not None:
+            return self.final
+        return {
+            **{key: "".join(parts) for key, parts in self.parts.items()},
+            "partial": True,
+            "chunks": self.chunks,
+        }

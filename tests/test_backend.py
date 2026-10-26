@@ -42,19 +42,18 @@ class SerializationTests(unittest.TestCase):
         self.assertIn("visible", value)
         self.assertIn(secret, serialization.safe_json(payload, redact=False))
 
-    def test_text_truncation_and_recursion(self):
+    def test_redaction_and_recursion(self):
         self.assertNotIn(
             "secret-value", serialization.redact_text("password=secret-value other=value")
         )
         self.assertNotIn("secret-value", serialization.redact_text("Bearer secret-value"))
         self.assertNotIn(
             "secret-value",
-            serialization.safe_json({"text": '{"token": "' + "secret-value" * 1000}, 1000),
+            serialization.safe_json({"text": '{"token": "' + "secret-value" * 1000}),
         )
         circular = {"x": []}
         circular["x"].append(circular)
         self.assertIn("circular", serialization.safe_json(circular))
-        self.assertLessEqual(len(serialization.safe_json({"data": "x" * 100000}, 1000)), 1013)
 
     def test_filter_scope(self):
         for text in (

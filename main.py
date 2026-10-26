@@ -20,11 +20,11 @@ from .continuation import CONTINUATION_EXTRA, IDENTITY_EXTRA, ContinuationProbe
 from .probe import RunnerProbe, event_from, field
 from .reply_filter import strip_thinking
 from .run_scope import RUN_SCOPE
-from .serialization import redact_text
+from .serialization import redact_text, safe_json
 from .store import EventStore
 
 PLUGIN_NAME = "astrbot_plugin_llm_monitor"
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 TASK_EXTRA = f"{PLUGIN_NAME}.task_id"
 TASK_STATE_EXTRA = f"{PLUGIN_NAME}.task_state"
 QUEUED_EXTRA = f"{PLUGIN_NAME}.queued_at"
@@ -50,7 +50,6 @@ class LLMMonitorPlugin(Star):
         self.context, self.config = context, config
         self.store = EventStore(
             Path(StarTools.get_data_dir(PLUGIN_NAME)) / "events.sqlite3",
-            max_text_chars=self._cfg("max_text_chars", 20000),
             retention_days=self._cfg("retention_days", 30),
             redact_secrets=self._cfg("redact_secrets", True),
         )
@@ -125,7 +124,7 @@ class LLMMonitorPlugin(Star):
     def record_failure(self, exc):
         self._record_errors += 1
         self._last_record_error = redact_text(
-            f"{type(exc).__name__}: {exc}", 2000, self.store.redact_secrets
+            f"{type(exc).__name__}: {exc}", redact=self.store.redact_secrets
         )
         if time.monotonic() - self._last_warning >= 30:
             logger.warning("[%s] collection degraded: %s", PLUGIN_NAME, self._last_record_error)
@@ -337,7 +336,10 @@ class LLMMonitorPlugin(Star):
             provider_model=model,
             attempt_kind="retry" if retry.get("is_retry") else "fallback" if fallback else "round",
             is_fallback=fallback,
-            input_text=dict(model=model, messages=list(messages or [])),
+            input_text=safe_json(
+                dict(capture_source="runner", model=model, messages=list(messages or [])),
+                redact=self.store.redact_secrets,
+            ),
             **retry,
         )
         # Agent/Cron runners can bypass on_llm_request. The first actual
@@ -350,6 +352,9 @@ class LLMMonitorPlugin(Star):
             queued_at=event.get_extra(QUEUED_EXTRA),
         )
         return span
+
+    def capture_llm_input(self, span, input_text):
+        return self._enqueue("llm_input", dict(id=span["id"], input_text=input_text))
 
     def start_attempt(self, call, layer, metadata, *, parent_id=None, operation=""):
         if not call.get("active") or not self.store.accepting or not self._cfg("enabled", True):
@@ -543,7 +548,7 @@ class LLMMonitorPlugin(Star):
                 await self._reconcile_running_tasks(tasks)
                 self._recovery_error = ""
             except Exception as exc:
-                self._recovery_error = redact_text(str(exc), 2000, self.store.redact_secrets)
+                self._recovery_error = redact_text(str(exc), redact=self.store.redact_secrets)
                 self.record_failure(exc)
             await asyncio.sleep(RECONCILE_INTERVAL_SECONDS)
 
@@ -556,7 +561,13 @@ class LLMMonitorPlugin(Star):
         ok = self._started and storage["ok"] and not self._record_errors
         ok = ok and (
             not enabled
-            or (probe["enabled"] and retry["ok"] and registry and not self._recovery_error)
+            or (
+                probe["enabled"]
+                and probe["provider_input_intact"]
+                and retry["ok"]
+                and registry
+                and not self._recovery_error
+            )
         )
         status = (
             "stopped"
