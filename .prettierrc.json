@@ -1,0 +1,12 @@
+{
+  "overrides": [
+    {
+      "files": [
+        "pages/monitor/app.js",
+        "pages/monitor/live-dom.js",
+        "tests/live-refresh.cjs"
+      ],
+      "options": { "semi": false }
+    }
+  ]
+}
