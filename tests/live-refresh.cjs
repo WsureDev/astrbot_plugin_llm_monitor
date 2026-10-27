@@ -302,6 +302,13 @@ async function run() {
 
     await page.locator("#close-detail").click()
     await page.waitForFunction(() => state.selected === null)
+    await page.evaluate(() => selectTask("task-0"))
+    await page.locator(".detail-summary").waitFor()
+    await page.locator("#close-detail").click()
+    await page.waitForFunction(() => state.selected === null)
+    checks.push(
+      "reopening an unchanged task renders content instead of retaining the loading placeholder",
+    )
     await page.evaluate(async () => {
       const row = document.querySelector('[data-task-id="task-10"]')
       row.scrollIntoView()

@@ -611,7 +611,7 @@ async function refreshDetail(id) {
 
 async function selectTask(id) {
   state.selected = id
-  byId("detail").innerHTML = '<div class="empty">正在加载…</div>'
+  renderHTML(byId("detail"), '<div class="empty">正在加载…</div>')
   message("detail-error", "")
   for (const button of byId("rows").querySelectorAll("button")) {
     button
